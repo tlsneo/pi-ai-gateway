@@ -1,0 +1,17 @@
+{
+  "name": "pi-ai-gateway",
+  "version": "0.1.0",
+  "description": "Register any OpenAI-compatible gateway (newapi, one-api, ...) as Pi providers with automatic model discovery and built-in metadata borrowing.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\""
+  }
+}

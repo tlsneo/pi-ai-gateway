@@ -1,0 +1,12 @@
+{
+  "gateways": [
+    {
+      "name": "your-gateway",
+      "baseUrl": "https://your-gateway.example.com/v1",
+      "apiKey": "sk-REPLACE_ME",
+      "overrides": {
+        "gpt-5.6-sol": { "contextWindow": 272000 }
+      }
+    }
+  ]
+}
