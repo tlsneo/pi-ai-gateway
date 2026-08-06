@@ -13,7 +13,7 @@
 ## 安装
 
 ```bash
-pi install git:github.com/<你的用户名>/pi-ai-gateway
+pi install git:github.com/tlsneo/pi-ai-gateway
 ```
 
 本地开发也可以用路径安装（改代码后重启 Pi 即生效）：

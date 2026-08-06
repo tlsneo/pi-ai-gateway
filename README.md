@@ -13,7 +13,7 @@ Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ..
 ## Install
 
 ```bash
-pi install git:github.com/<your-username>/pi-ai-gateway
+pi install git:github.com/tlsneo/pi-ai-gateway
 ```
 
 For local development, you can also install from a path (changes take effect on next Pi start):
