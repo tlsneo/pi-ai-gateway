@@ -5,7 +5,9 @@
 把任意 OpenAI 兼容网关（newapi、one-api、自建代理等）注册为 [Pi](https://pi.dev) 的 provider。
 
 - **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`，网关里新增模型自动出现
-- **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / 价格 / compat，无需手工配置
+- **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
+- **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格
+- **可选价格预设**：网关缺少某模型价格时，可按网关显式选择 Models.dev 或 BaseLLM；手动价格始终最高优先级
 - **零噪音**：自动剔除 image / embedding / tts 等不可聊天的模型
 - **弹性**：单网关失败不影响 Pi 启动，断网时用上次缓存降级
 - **零依赖**：纯扩展，无第三方 npm 依赖
@@ -32,11 +34,14 @@ pi install ./pi-ai-gateway
     {
       "name": "newapi",
       "baseUrl": "https://your-gateway.example.com/v1",
-      "apiKey": "sk-你的密钥"
+      "apiKey": "sk-你的密钥",
+      "pricePreset": "models-dev"
     }
   ]
 }
 ```
+
+`pricePreset` 是可选项；如果只希望使用网关自己公布的价格，可以省略。
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
@@ -45,7 +50,8 @@ pi install ./pi-ai-gateway
 | `apiKey` | ✅ | 直接写密钥（也支持 `$ENV` 引用语法） |
 | `api` | ❌ | 默认 `openai-completions` |
 | `headers` | ❌ | 附加请求头 |
-| `overrides` | ❌ | 按模型覆盖元数据（见下） |
+| `pricePreset` | ❌ | 缺失价格回退：`"models-dev"` 或 `"basellm"`；省略时只采用网关价格 |
+| `overrides` | ❌ | 按模型覆盖元数据及手动价格（见下） |
 
 配置完成后重启 Pi，`/model` 里即可看到 `newapi/` 前缀的全部模型。
 
@@ -53,7 +59,7 @@ pi install ./pi-ai-gateway
 
 ### overrides：按模型覆盖元数据（可选）
 
-默认情况下上下文/思考/价格全部自动来自 Pi 内置目录。个别模型需要调整时（例如 GPT-5.6 超过 27.2 万 token 进入长上下文计费档，想限制在便宜档），可以按模型覆盖：
+默认情况下，能力信息来自 Pi 内置目录；价格则优先来自网关自身的 `/api/pricing`。个别模型仍可手动调整：
 
 ```json
 {
@@ -72,7 +78,37 @@ pi install ./pi-ai-gateway
 }
 ```
 
-支持覆盖的字段：`contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`。只覆盖列出的模型，其余模型照常自动。设置 `contextWindow` 后 Pi 会在接近上限时自动压缩，请求不会超限。
+支持覆盖的字段：`contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`。手动 `cost` 覆盖拥有最高优先级。只覆盖列出的模型，其余模型照常自动。设置 `contextWindow` 后 Pi 会在接近上限时自动压缩，请求不会超限。
+
+### 价格优先级与预设
+
+每个网关模型独立按以下顺序决定价格：
+
+```text
+手动模型价格 > 网关 /api/pricing > 已选择的回退预设 > $0
+```
+
+默认不会自动套用公共预设，避免把“官方参考价”误显示成某个代理网关的实际收费。
+
+```text
+/ai-gateway set-price show
+/ai-gateway set-price preset models-dev
+/ai-gateway set-price preset basellm
+/ai-gateway set-price preset none
+```
+
+- `models-dev`：网关没有价格时，从 <https://models.dev/api.json> 读取按服务商区分的参考价格。
+- `basellm`：将 <https://basellm.github.io/llm-metadata/api/newapi/ratio_config-v1-base.json> 的 NewAPI 倍率预设换算成每百万 token 美元价格。
+- `none`：恢复默认，只采用网关价格；缺少价格时为 `$0`。
+
+手动设置单模型价格，单位为每百万 token 美元：
+
+```text
+/ai-gateway set-price manual gpt-5.6-sol 5 30 0.5 6.25
+/ai-gateway set-price remove gpt-5.6-sol
+```
+
+`manual` 后不带参数时会交互询问模型和四项价格。手动价格保存在现有的 `overrides.cost` 字段中。
 
 ## 命令
 
@@ -86,6 +122,14 @@ pi install ./pi-ai-gateway
                           交互设置单模型覆盖（自动带出当前档案值作默认）
 /ai-gateway overrides remove <模型ID>
                           移除某个模型的覆盖
+/ai-gateway set-price show
+                          查看该网关的价格回退预设和手动价格
+/ai-gateway set-price preset <none|models-dev|basellm>
+                          为该网关选择缺失价格回退
+/ai-gateway set-price manual <模型ID> <输入> <输出> [缓存读取] [缓存写入]
+                          设置每百万 token 美元价格
+/ai-gateway set-price remove <模型ID>
+                          删除手动模型价格
 ```
 
 ### 交互设置模型覆盖（不用手改 JSON）
@@ -111,13 +155,15 @@ pi install ./pi-ai-gateway
 ```
 启动时，对每个网关：
   1. GET {baseUrl}/v1/models            → 模型名单
-  2. 索引 Pi 内置目录 providers/data/*.json → 模型档案库
-  3. 每个模型 id 借元数据：
-     reasoning / thinkingLevelMap / contextWindow / maxTokens / cost / compat
-     找不到 → 安全默认值（无思考、128K、价格 $0）
-  4. 合并用户覆盖（overrides）
-  5. 自动过滤 image/embedding/audio/tts/rerank 类模型
-  6. 注册为 provider：newapi/gpt-5.6-sol
+  2. GET {网关根地址}/api/pricing       → 网关价格（尽力获取）
+  3. 索引 Pi 内置目录 providers/data/*.json → 能力档案库
+  4. 每个模型 id 借能力元数据：
+     reasoning / thinkingLevelMap / contextWindow / maxTokens / compat
+     找不到 → 安全默认值（无思考、128K）
+  5. 解析价格：手动 > 网关 > 已选预设 > $0
+  6. 合并其他用户覆盖
+  7. 自动过滤 image/embedding/audio/tts/rerank 类模型
+  8. 注册为 provider：newapi/gpt-5.6-sol
 ```
 
 ### 配置文件 vs 缓存文件

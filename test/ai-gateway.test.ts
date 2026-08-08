@@ -13,10 +13,20 @@ import {
   loadConfig,
   normalizeBaseUrl,
   parseGatewayConfig,
+  registerGateway,
   saveConfig,
   toPositiveInt,
   validateGateway,
 } from "../extensions/ai-gateway.ts";
+import {
+  ZERO_COST,
+  findCatalogCost,
+  findModelsDevCost,
+  parseNewApiPricing,
+  parseNewApiRatioCatalog,
+  parseTieredBillingExpr,
+  resolveModelCost,
+} from "../src/pricing.ts";
 
 // ---------------------------------------------------------------------------
 // parseGatewayConfig
@@ -212,6 +222,187 @@ test("applyOverrides: returns base unchanged when overrides are undefined", () =
 test("validateGateway: rejects invalid overrides", () => {
   const gw = { name: "gw", baseUrl: "https://x/v1", apiKey: "sk-1", overrides: "bad" } as unknown as Parameters<typeof validateGateway>[0];
   assert.ok(validateGateway(gw));
+});
+
+test("validateGateway: accepts supported price presets and rejects unknown ones", () => {
+  assert.equal(validateGateway({ name: "gw", baseUrl: "https://x/v1", apiKey: "sk-1", pricePreset: "models-dev" }), null);
+  assert.equal(validateGateway({ name: "gw", baseUrl: "https://x/v1", apiKey: "sk-1", pricePreset: "basellm" }), null);
+  const invalid = { name: "gw", baseUrl: "https://x/v1", apiKey: "sk-1", pricePreset: "mystery" } as unknown as Parameters<typeof validateGateway>[0];
+  assert.match(validateGateway(invalid) ?? "", /pricePreset/);
+});
+
+// ---------------------------------------------------------------------------
+// pricing
+// ---------------------------------------------------------------------------
+
+test("parseNewApiPricing: converts gateway ratios to per-million-token prices", () => {
+  const prices = parseNewApiPricing({
+    success: true,
+    data: [{
+      model_name: "model-a",
+      quota_type: 0,
+      model_ratio: 1.25,
+      completion_ratio: 6,
+      cache_ratio: 0.1,
+      create_cache_ratio: 1.25,
+    }],
+  }, 500_000);
+
+  assert.deepEqual(prices.get("model-a"), {
+    input: 2.5,
+    output: 15,
+    cacheRead: 0.25,
+    cacheWrite: 3.125,
+  });
+});
+
+test("parseTieredBillingExpr: converts NewAPI context tiers to Pi cost tiers", () => {
+  const cost = parseTieredBillingExpr(
+    'len <= 272000 ? tier("short", p * 5 + c * 30 + cr * 0.5 + cc * 6.25) : tier("long", p * 10 + c * 45 + cr * 1 + cc * 12.5)',
+  );
+
+  assert.deepEqual(cost, {
+    input: 5,
+    output: 30,
+    cacheRead: 0.5,
+    cacheWrite: 6.25,
+    tiers: [{
+      inputTokensAbove: 272000,
+      input: 10,
+      output: 45,
+      cacheRead: 1,
+      cacheWrite: 12.5,
+    }],
+  });
+});
+
+test("parseTieredBillingExpr: supports multiple increasing context tiers", () => {
+  const cost = parseTieredBillingExpr(
+    'len <= 32000 ? tier("small", p * 1 + c * 2) : len <= 256000 ? tier("medium", p * 3 + c * 4) : tier("large", p * 5 + c * 6)',
+  );
+
+  assert.deepEqual(cost?.tiers, [
+    { inputTokensAbove: 32000, input: 3, output: 4, cacheRead: 0, cacheWrite: 0 },
+    { inputTokensAbove: 256000, input: 5, output: 6, cacheRead: 0, cacheWrite: 0 },
+  ]);
+});
+
+test("parseNewApiRatioCatalog: provides a case-insensitive BaseLLM preset", () => {
+  const prices = parseNewApiRatioCatalog({
+    success: true,
+    data: {
+      model_ratio: { "MiniMax-M3": 0.15 },
+      completion_ratio: { "MiniMax-M3": 4 },
+      cache_ratio: { "MiniMax-M3": 0.2 },
+      model_price: {},
+      billing_mode: {},
+      billing_expr: {},
+    },
+  });
+
+  assert.deepEqual(findCatalogCost(prices, "minimax-m3"), {
+    input: 0.3,
+    output: 1.2,
+    cacheRead: 0.06,
+    cacheWrite: 0,
+  });
+});
+
+test("findModelsDevCost: prefers the model lab price over zero-cost token plans", () => {
+  const payload = {
+    "alibaba-token-plan": {
+      models: {
+        "qwen3.8-max": { cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 } },
+      },
+    },
+    alibaba: {
+      models: {
+        "qwen3.8-max": { cost: { input: 2, output: 6, cache_read: 0.25, cache_write: 2.5 } },
+      },
+    },
+  };
+
+  assert.deepEqual(findModelsDevCost(payload, "qwen3.8-max"), {
+    input: 2,
+    output: 6,
+    cacheRead: 0.25,
+    cacheWrite: 2.5,
+  });
+});
+
+test("resolveModelCost: manual overrides gateway prices, then configured presets fill gaps", () => {
+  const gateway = new Map([["priced", { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }]]);
+  const preset = new Map([
+    ["priced", { input: 10, output: 20, cacheRead: 0, cacheWrite: 0 }],
+    ["fallback", { input: 3, output: 4, cacheRead: 0, cacheWrite: 0 }],
+  ]);
+
+  assert.deepEqual(resolveModelCost("priced", gateway, preset), gateway.get("priced"));
+  assert.deepEqual(resolveModelCost("fallback", gateway, preset), preset.get("fallback"));
+  assert.deepEqual(resolveModelCost("unknown", gateway, preset), ZERO_COST);
+});
+
+test("registerGateway: applies live /api/pricing and lets a manual cost override win", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-pricing-"));
+  const previousFetch = globalThis.fetch;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  let registeredModels: Array<{ id: string; cost: unknown }> = [];
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({ data: [{ id: "gateway-price" }, { id: "manual-price" }] }));
+    }
+    if (url.endsWith("/api/status")) {
+      return new Response(JSON.stringify({ success: true, data: { quota_per_unit: 500_000 } }));
+    }
+    if (url.endsWith("/api/pricing")) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: [
+          { model_name: "gateway-price", quota_type: 0, model_ratio: 1, completion_ratio: 4 },
+          { model_name: "manual-price", quota_type: 0, model_ratio: 2, completion_ratio: 3 },
+        ],
+      }));
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const pi = {
+      registerProvider(_name: string, config: { models: Array<{ id: string; cost: unknown }> }) {
+        registeredModels = config.models;
+      },
+    } as unknown as Parameters<typeof registerGateway>[0];
+    const result = await registerGateway(pi, {
+      name: "gw",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-test",
+      overrides: {
+        "manual-price": { cost: { input: 9, output: 10, cacheRead: 1, cacheWrite: 2 } },
+      },
+    }, new Map(), {});
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(registeredModels.find((model) => model.id === "gateway-price")?.cost, {
+      input: 2,
+      output: 8,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    assert.deepEqual(registeredModels.find((model) => model.id === "manual-price")?.cost, {
+      input: 9,
+      output: 10,
+      cacheRead: 1,
+      cacheWrite: 2,
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

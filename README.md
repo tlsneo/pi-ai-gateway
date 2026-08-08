@@ -5,7 +5,9 @@
 Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ...) as a [Pi](https://pi.dev) provider.
 
 - **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup — new models added on the gateway appear automatically
-- **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / pricing / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`) — no manual configuration
+- **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
+- **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers
+- **Optional price presets**: when a gateway does not publish a model price, opt into Models.dev or BaseLLM defaults per gateway; manual prices always win
 - **Zero noise**: automatically filters out non-chat models (image / embedding / tts / rerank)
 - **Resilient**: a failing gateway never breaks Pi startup; falls back to a cached model list when offline
 - **Zero dependencies**: pure extension, no third-party npm packages
@@ -32,11 +34,14 @@ Create `~/.pi/agent/ai-gateway.json` (template: `ai-gateway.example.json`):
     {
       "name": "newapi",
       "baseUrl": "https://your-gateway.example.com/v1",
-      "apiKey": "sk-your-key"
+      "apiKey": "sk-your-key",
+      "pricePreset": "models-dev"
     }
   ]
 }
 ```
+
+`pricePreset` is optional; omit it if you only want prices published by the gateway itself.
 
 | Field | Required | Description |
 |---|---|---|
@@ -45,7 +50,8 @@ Create `~/.pi/agent/ai-gateway.json` (template: `ai-gateway.example.json`):
 | `apiKey` | ✅ | Write the key directly (the `$ENV` reference syntax is also supported) |
 | `api` | ❌ | Defaults to `openai-completions` |
 | `headers` | ❌ | Extra request headers |
-| `overrides` | ❌ | Per-model metadata overrides (see below) |
+| `pricePreset` | ❌ | Missing-price fallback: `"models-dev"` or `"basellm"`; omitted means gateway prices only |
+| `overrides` | ❌ | Per-model metadata and manual price overrides (see below) |
 
 Restart Pi after configuring; all models will appear under `/model` with the `newapi/` prefix.
 
@@ -53,7 +59,7 @@ Restart Pi after configuring; all models will appear under `/model` with the `ne
 
 ### overrides: per-model metadata overrides (optional)
 
-By default, context / thinking / pricing come automatically from Pi's built-in catalog. For individual models that need adjustment (e.g. capping GPT-5.6 at 272K tokens to stay in the cheap billing tier), override per model:
+By default, capabilities come from Pi's built-in catalog, while prices come from the gateway's `/api/pricing` endpoint when it is available. Individual models can still be adjusted manually:
 
 ```json
 {
@@ -72,7 +78,37 @@ By default, context / thinking / pricing come automatically from Pi's built-in c
 }
 ```
 
-Supported fields: `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`. Only listed models are affected; everything else stays automatic. When `contextWindow` is set, Pi auto-compacts before reaching the limit, so requests never exceed it.
+Supported fields: `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`. A manual `cost` override has the highest priority. Only listed models are affected; everything else stays automatic. When `contextWindow` is set, Pi auto-compacts before reaching the limit, so requests never exceed it.
+
+### Price resolution and presets
+
+Prices are resolved independently for every gateway model:
+
+```text
+manual model cost > gateway /api/pricing > selected fallback preset > $0
+```
+
+No public preset is applied unless you select it for that gateway. This avoids pretending that an official reference price is the amount charged by an unrelated proxy.
+
+```text
+/ai-gateway set-price show
+/ai-gateway set-price preset models-dev
+/ai-gateway set-price preset basellm
+/ai-gateway set-price preset none
+```
+
+- `models-dev` uses provider-specific reference prices from <https://models.dev/api.json> only when the gateway has no price for a model.
+- `basellm` converts the NewAPI ratio preset at <https://basellm.github.io/llm-metadata/api/newapi/ratio_config-v1-base.json> into per-million-token prices.
+- `none` restores the default: gateway prices only, then `$0` for missing prices.
+
+Set a manual model price, in USD per one million tokens:
+
+```text
+/ai-gateway set-price manual gpt-5.6-sol 5 30 0.5 6.25
+/ai-gateway set-price remove gpt-5.6-sol
+```
+
+With no arguments after `manual`, Pi prompts for the model and four rates. Manual prices are stored in the existing per-model `overrides.cost` field.
 
 ## Commands
 
@@ -86,6 +122,14 @@ Supported fields: `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMa
                           Interactively set an override (current catalog value shown as default)
 /ai-gateway overrides remove <modelID>
                           Remove an override for a model
+/ai-gateway set-price show
+                          Show this gateway's fallback preset and manual model prices
+/ai-gateway set-price preset <none|models-dev|basellm>
+                          Select a missing-price fallback for this gateway
+/ai-gateway set-price manual <modelID> <input> <output> [cacheRead] [cacheWrite]
+                          Set a manual USD-per-1M-token price
+/ai-gateway set-price remove <modelID>
+                          Remove a manual model price
 ```
 
 ### Setting overrides interactively (no manual JSON editing)
@@ -111,13 +155,15 @@ Or pass arguments directly to skip the prompts:
 ```
 At startup, for each gateway:
   1. GET {baseUrl}/v1/models                  → model list
-  2. Index Pi's built-in catalog providers/data/*.json → model knowledge base
-  3. For each model id, borrow metadata:
-     reasoning / thinkingLevelMap / contextWindow / maxTokens / cost / compat
-     Not found → safe defaults (no thinking, 128K, price $0)
-  4. Merge user overrides
-  5. Filter out image/embedding/audio/tts/rerank models
-  6. Register as provider: newapi/gpt-5.6-sol
+  2. GET {gatewayRoot}/api/pricing            → gateway prices (best effort)
+  3. Index Pi's built-in catalog providers/data/*.json → capability knowledge base
+  4. For each model id, borrow capabilities:
+     reasoning / thinkingLevelMap / contextWindow / maxTokens / compat
+     Not found → safe defaults (no thinking, 128K)
+  5. Resolve price: manual > gateway > selected preset > $0
+  6. Merge remaining user overrides
+  7. Filter out image/embedding/audio/tts/rerank models
+  8. Register as provider: newapi/gpt-5.6-sol
 ```
 
 ### Config file vs cache file

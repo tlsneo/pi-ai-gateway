@@ -3,15 +3,14 @@
  *
  * Registers any OpenAI-compatible gateway (newapi, one-api, etc.) as a Pi provider:
  *   - Automatically fetches {baseUrl}/v1/models at startup for the model list
- *   - Borrows metadata from Pi's built-in model catalog
- *     (providers/data/*.json, refreshed by `pi update --models`):
- *     reasoning / thinkingLevelMap / contextWindow / maxTokens / cost / compat
+ *   - Borrows capabilities from Pi's built-in model catalog
+ *   - Uses gateway-published /api/pricing when available; optional presets fill missing prices
  *   - Models missing from the catalog get safe defaults without blocking registration
  *   - Automatically filters out non-chat models (image/embedding/audio/tts/rerank)
  *   - Per-gateway failure isolation + cache fallback, Pi startup never breaks
  *
  * Config: ~/.pi/agent/ai-gateway.json (see ai-gateway.example.json)
- * Commands: /ai-gateway add|list|remove|test|overrides
+ * Commands: /ai-gateway add|list|remove|test|overrides|set-price
  */
 
 import fs from "node:fs";
@@ -24,6 +23,19 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+import {
+  BASELLM_PRICE_PRESET_URL,
+  MODELS_DEV_PRICE_PRESET_URL,
+  ZERO_COST,
+  buildModelsDevCatalog,
+  normalizeCost,
+  parseNewApiPricing,
+  parseNewApiRatioCatalog,
+  resolveModelCost,
+  type ModelCost,
+  type PriceCatalog,
+  type PricePreset,
+} from "../src/pricing.ts";
 
 // ===========================================================================
 // Constants
@@ -37,6 +49,8 @@ const NOISE_PATTERN = /image|embedding|audio|tts|rerank|dall-e|whisper/i;
 const DEFAULT_API = "openai-completions";
 const DEFAULT_CONTEXT_WINDOW = 128000;
 const DEFAULT_MAX_TOKENS = 16384;
+const PRICING_FETCH_TIMEOUT_MS = 5000;
+const PRESET_FETCH_TIMEOUT_MS = 8000;
 
 /** Gateway names colliding with built-in providers are rejected (prevents accidental replacement). */
 const BUILTIN_PROVIDERS = new Set([
@@ -89,6 +103,8 @@ export interface GatewayConfig {
   apiKey: string;
   api?: string;
   headers?: Record<string, string>;
+  /** Optional fallback source used only when the gateway does not publish a model price. */
+  pricePreset?: PricePreset;
   /** Optional per-model metadata overrides, e.g. { "gpt-5.6-sol": { "contextWindow": 272000 } } */
   overrides?: Record<string, Partial<ModelMeta>>;
 }
@@ -146,6 +162,9 @@ export function validateGateway(gw: GatewayConfig): string | null {
   if (gw.api !== undefined && typeof gw.api !== "string") {
     return "api must be a string";
   }
+  if (gw.pricePreset !== undefined && gw.pricePreset !== "models-dev" && gw.pricePreset !== "basellm") {
+    return 'pricePreset must be "models-dev" or "basellm"';
+  }
   if (gw.overrides !== undefined) {
     if (gw.overrides === null || typeof gw.overrides !== "object" || Array.isArray(gw.overrides)) {
       return "overrides must be an object { modelId: { contextWindow?: number, ... } }";
@@ -191,7 +210,7 @@ export interface ModelMeta {
   reasoning: boolean;
   thinkingLevelMap?: Record<string, string | null>;
   input: ("text" | "image")[];
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  cost: ModelCost;
   contextWindow: number;
   maxTokens: number;
   compat?: Record<string, unknown>;
@@ -200,7 +219,7 @@ export interface ModelMeta {
 const DEFAULT_META: ModelMeta = {
   reasoning: false,
   input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  cost: ZERO_COST,
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
 };
@@ -273,12 +292,7 @@ function toMeta(m: Record<string, unknown>): ModelMeta {
     reasoning: m.reasoning === true,
     thinkingLevelMap: m.thinkingLevelMap as ModelMeta["thinkingLevelMap"] | undefined,
     input: Array.isArray(input) && input.length > 0 ? input : DEFAULT_META.input,
-    cost: {
-      input: typeof cost?.input === "number" ? cost.input : 0,
-      output: typeof cost?.output === "number" ? cost.output : 0,
-      cacheRead: typeof cost?.cacheRead === "number" ? cost.cacheRead : 0,
-      cacheWrite: typeof cost?.cacheWrite === "number" ? cost.cacheWrite : 0,
-    },
+    cost: normalizeCost(cost) ?? ZERO_COST,
     contextWindow: typeof m.contextWindow === "number" ? m.contextWindow : DEFAULT_CONTEXT_WINDOW,
     maxTokens: typeof m.maxTokens === "number" ? m.maxTokens : DEFAULT_MAX_TOKENS,
     compat: m.compat as Record<string, unknown> | undefined,
@@ -350,6 +364,67 @@ export function applyOverrides(
 /** Remove non-chat noise models (image/embedding/audio/tts/rerank...). */
 export function filterModelIds(ids: string[]): string[] {
   return ids.filter((id) => !NOISE_PATTERN.test(id));
+}
+
+/** Remove the OpenAI-compatible /v1 suffix to address gateway-owned REST endpoints. */
+export function gatewayRootUrl(url: string): string {
+  return normalizeBaseUrl(url).replace(/\/v1$/i, "");
+}
+
+async function fetchJson(url: string, timeoutMs: number, headers?: Record<string, string>): Promise<unknown> {
+  const res = await fetch(url, {
+    ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`GET ${url} → HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchGatewayPrices(gw: GatewayConfig): Promise<PriceCatalog> {
+  const root = gatewayRootUrl(gw.baseUrl);
+  try {
+    const [pricingResult, statusResult] = await Promise.allSettled([
+      fetchJson(`${root}/api/pricing`, PRICING_FETCH_TIMEOUT_MS),
+      fetchJson(`${root}/api/status`, PRICING_FETCH_TIMEOUT_MS),
+    ]);
+    if (pricingResult.status !== "fulfilled") return new Map();
+    const status = statusResult.status === "fulfilled" && statusResult.value && typeof statusResult.value === "object"
+      ? statusResult.value as { data?: { quota_per_unit?: unknown } }
+      : undefined;
+    const quotaPerUnit = typeof status?.data?.quota_per_unit === "number" && status.data.quota_per_unit > 0
+      ? status.data.quota_per_unit
+      : 500_000;
+    return parseNewApiPricing(pricingResult.value, quotaPerUnit);
+  } catch {
+    return new Map();
+  }
+}
+
+const presetPayloads = new Map<PricePreset, Promise<unknown>>();
+
+async function fetchPresetPayload(preset: PricePreset): Promise<unknown> {
+  const existing = presetPayloads.get(preset);
+  if (existing) return existing;
+  const url = preset === "models-dev" ? MODELS_DEV_PRICE_PRESET_URL : BASELLM_PRICE_PRESET_URL;
+  const request = fetchJson(url, PRESET_FETCH_TIMEOUT_MS).catch((error) => {
+    presetPayloads.delete(preset);
+    throw error;
+  });
+  presetPayloads.set(preset, request);
+  return request;
+}
+
+async function fetchPresetPrices(preset: PricePreset | undefined, modelIds: string[]): Promise<PriceCatalog> {
+  if (!preset) return new Map();
+  try {
+    const payload = await fetchPresetPayload(preset);
+    return preset === "models-dev"
+      ? buildModelsDevCatalog(payload, modelIds)
+      : parseNewApiRatioCatalog(payload);
+  } catch (error) {
+    console.warn(`[ai-gateway] Price preset ${preset} unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return new Map();
+  }
 }
 
 export async function fetchModelIds(gw: GatewayConfig): Promise<string[]> {
@@ -445,9 +520,18 @@ export async function registerGateway(
   }
 
   const filtered = filterModelIds(ids);
-  const models = filtered.map((id) =>
-    toProviderModel(id, applyOverrides(id, borrowMeta(catalog, id), gw.overrides)),
-  );
+  const [gatewayPrices, presetPrices] = await Promise.all([
+    fetchGatewayPrices(gw),
+    fetchPresetPrices(gw.pricePreset, filtered),
+  ]);
+  const models = filtered.map((id) => {
+    const override = gw.overrides?.[id];
+    const meta = applyOverrides(id, borrowMeta(catalog, id), gw.overrides);
+    return toProviderModel(id, {
+      ...meta,
+      cost: resolveModelCost(id, gatewayPrices, presetPrices, override?.cost),
+    });
+  });
 
   const config: ProviderConfig = {
     name: gw.name,
@@ -520,8 +604,116 @@ async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: ExtensionComm
     }
     case "overrides":
       return overridesCommand(pi, ctx, rest.join(" "));
+    case "set-price":
+      return setPriceCommand(pi, ctx, rest);
     default:
-      ui.notify("Usage: /ai-gateway add | list | remove <name> | test <name> | overrides [list|add|remove]", "info");
+      ui.notify("Usage: /ai-gateway add | list | remove <name> | test <name> | overrides [...] | set-price [...]", "info");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /ai-gateway set-price — configure gateway price discovery and fallbacks
+// ---------------------------------------------------------------------------
+
+function updateGateway(gateway: GatewayConfig): void {
+  const config = loadConfig();
+  saveConfig({ gateways: config.gateways.map((item) => (item.name === gateway.name ? gateway : item)) });
+}
+
+function parseNonNegativeNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const number = Number(trimmed);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+async function setPriceCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string[]): Promise<void> {
+  const gw = await pickGateway(ctx);
+  if (!gw) return;
+  const [action = "show", ...rest] = args;
+
+  switch (action) {
+    case "show": {
+      const manual = Object.entries(gw.overrides ?? {}).filter(([, override]) => override.cost !== undefined);
+      const lines = [
+        `Gateway: ${gw.name}`,
+        `Fallback preset: ${gw.pricePreset ?? "none"}`,
+        `Manual model prices: ${manual.length}`,
+        ...manual.map(([id, override]) => `• ${id}: ${JSON.stringify(override.cost)}`),
+      ];
+      ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+    case "preset": {
+      let value: string | undefined = rest[0]?.toLowerCase();
+      if (!value && ctx.hasUI) {
+        value = (await ctx.ui.select("Price fallback preset", ["none", "models-dev", "basellm"])) ?? undefined;
+      }
+      if (value !== "none" && value !== "models-dev" && value !== "basellm") {
+        ctx.ui.notify("Usage: /ai-gateway set-price preset <none|models-dev|basellm>", "warning");
+        return;
+      }
+      const next: GatewayConfig = { ...gw, pricePreset: value === "none" ? undefined : value };
+      updateGateway(next);
+      ctx.ui.notify(`Price fallback for "${gw.name}" set to ${value}; re-registering...`, "info");
+      await reregister(pi, next, ctx);
+      return;
+    }
+    case "manual": {
+      let [modelId, inputRaw, outputRaw, cacheReadRaw, cacheWriteRaw] = rest as Array<string | undefined>;
+      if (!modelId && ctx.hasUI) modelId = (await ctx.ui.input("Model ID (e.g. gpt-5.6-sol)")) ?? undefined;
+      if (!modelId) return;
+
+      if (inputRaw === undefined && ctx.hasUI) inputRaw = (await ctx.ui.input("Input USD per 1M tokens", "0")) ?? undefined;
+      if (outputRaw === undefined && ctx.hasUI) outputRaw = (await ctx.ui.input("Output USD per 1M tokens", "0")) ?? undefined;
+      if (cacheReadRaw === undefined && ctx.hasUI) cacheReadRaw = (await ctx.ui.input("Cache read USD per 1M tokens", "0")) ?? undefined;
+      if (cacheWriteRaw === undefined && ctx.hasUI) cacheWriteRaw = (await ctx.ui.input("Cache write USD per 1M tokens", "0")) ?? undefined;
+
+      const parsed = [inputRaw, outputRaw, cacheReadRaw ?? "0", cacheWriteRaw ?? "0"].map((value) =>
+        parseNonNegativeNumber(value ?? ""),
+      );
+      if (parsed.some((value) => value === null)) {
+        ctx.ui.notify("Prices must be non-negative numbers", "error");
+        return;
+      }
+      const [input, output, cacheRead, cacheWrite] = parsed as number[];
+      const overrides = { ...(gw.overrides ?? {}) };
+      overrides[modelId] = {
+        ...(overrides[modelId] ?? {}),
+        cost: { input, output, cacheRead, cacheWrite },
+      };
+      const next = { ...gw, overrides };
+      updateGateway(next);
+      ctx.ui.notify(`Saved manual price for "${modelId}"; re-registering...`, "info");
+      await reregister(pi, next, ctx);
+      return;
+    }
+    case "remove": {
+      const modelId = rest[0];
+      if (!modelId) {
+        ctx.ui.notify("Usage: /ai-gateway set-price remove <modelID>", "warning");
+        return;
+      }
+      const overrides = { ...(gw.overrides ?? {}) };
+      const current = overrides[modelId];
+      if (!current?.cost) {
+        ctx.ui.notify(`No manual price configured for "${modelId}"`, "warning");
+        return;
+      }
+      const { cost: _cost, ...metadataOverride } = current;
+      if (Object.keys(metadataOverride).length > 0) overrides[modelId] = metadataOverride;
+      else delete overrides[modelId];
+      const next = { ...gw, overrides: Object.keys(overrides).length > 0 ? overrides : undefined };
+      updateGateway(next);
+      ctx.ui.notify(`Removed manual price for "${modelId}"; re-registering...`, "info");
+      await reregister(pi, next, ctx);
+      return;
+    }
+    default:
+      ctx.ui.notify(
+        "Usage: /ai-gateway set-price [show|preset <none|models-dev|basellm>|manual <modelID> <input> <output> [cacheRead] [cacheWrite]|remove <modelID>]",
+        "info",
+      );
   }
 }
 
@@ -625,17 +817,19 @@ async function overridesAdd(
   const currentOv = { ...(gw.overrides ?? {}) };
 
   // Argument form: /ai-gateway overrides add <modelID> [contextWindow] [maxTokens]
-  let modelId = args[0];
+  let modelId: string | undefined = args[0];
   const argCtx = toPositiveInt(args[1] ?? "");
   const argMax = toPositiveInt(args[2] ?? "");
 
   if (!modelId) {
-    modelId = await ui.input("Model ID (e.g. gpt-5.6-sol)");
+    modelId = (await ui.input("Model ID (e.g. gpt-5.6-sol)")) ?? undefined;
     if (!modelId) return;
   }
   modelId = modelId.trim();
 
-  const base = currentOv[modelId] ?? borrowMeta(catalog, modelId);
+  const catalogBase = borrowMeta(catalog, modelId);
+  const existingOverride = currentOv[modelId] ?? {};
+  const base = applyOverrides(modelId, catalogBase, currentOv);
   const curCtx = base.contextWindow;
   const curMax = base.maxTokens;
   const curReasoning = base.reasoning;
@@ -688,7 +882,7 @@ async function overridesAdd(
   if (contextWindow !== undefined) ov.contextWindow = contextWindow;
   if (maxTokens !== undefined) ov.maxTokens = maxTokens;
   if (reasoning !== undefined) ov.reasoning = reasoning;
-  currentOv[modelId] = { ...base, ...ov };
+  currentOv[modelId] = { ...existingOverride, ...ov };
   const cleaned = stripRedundant(currentOv, catalog);
 
   const config = loadConfig();
@@ -715,8 +909,17 @@ function stripRedundant(
     const base = borrowMeta(catalog, id);
     const diff: Partial<ModelMeta> = {};
     for (const key of Object.keys(ov) as Array<keyof ModelMeta>) {
-      const v = ov[key];
-      if (v !== undefined && v !== base[key]) diff[key] = v;
+      if (key === "cost") {
+        if (ov.cost !== undefined) diff.cost = ov.cost;
+        continue;
+      }
+      if (key === "name" && ov.name !== undefined && ov.name !== base.name) diff.name = ov.name;
+      else if (key === "reasoning" && ov.reasoning !== undefined && ov.reasoning !== base.reasoning) diff.reasoning = ov.reasoning;
+      else if (key === "thinkingLevelMap" && ov.thinkingLevelMap !== undefined && ov.thinkingLevelMap !== base.thinkingLevelMap) diff.thinkingLevelMap = ov.thinkingLevelMap;
+      else if (key === "input" && ov.input !== undefined && ov.input !== base.input) diff.input = ov.input;
+      else if (key === "contextWindow" && ov.contextWindow !== undefined && ov.contextWindow !== base.contextWindow) diff.contextWindow = ov.contextWindow;
+      else if (key === "maxTokens" && ov.maxTokens !== undefined && ov.maxTokens !== base.maxTokens) diff.maxTokens = ov.maxTokens;
+      else if (key === "compat" && ov.compat !== undefined && ov.compat !== base.compat) diff.compat = ov.compat;
     }
     if (Object.keys(diff).length > 0) cleaned[id] = diff;
   }
@@ -783,14 +986,15 @@ async function listGateways(ctx: ExtensionCommandContext): Promise<void> {
   const lines = config.gateways.map((g) => {
     const cached = cache[g.name];
     const modelInfo = cached && cached.length > 0 ? `${cached.length} models (cached)` : "not fetched";
-    return `• ${g.name} → ${normalizeBaseUrl(g.baseUrl)}（${modelInfo}）`;
+    const priceInfo = g.pricePreset ? `price fallback ${g.pricePreset}` : "gateway prices only";
+    return `• ${g.name} → ${normalizeBaseUrl(g.baseUrl)}（${modelInfo}; ${priceInfo}）`;
   });
   ctx.ui.notify(`${config.gateways.length} gateways configured:\n${lines.join("\n")}`, "info");
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
   pi.registerCommand("ai-gateway", {
-    description: "Manage OpenAI-compatible gateways: add / list / remove <name> / test <name>",
+    description: "Manage gateways, metadata overrides, and model prices",
     handler: (args, ctx) => gatewayCommand(pi, args, ctx),
   });
 
