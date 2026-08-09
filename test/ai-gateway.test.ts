@@ -8,12 +8,15 @@ import {
   applyOverrides,
   borrowMeta,
   buildCatalogIndex,
+  buildOpenAIResponsesModelIds,
   configPath,
+  createGatewayConfig,
   filterModelIds,
   loadConfig,
   normalizeBaseUrl,
   parseGatewayConfig,
   registerGateway,
+  resolveModelApi,
   saveConfig,
   toPositiveInt,
   validateGateway,
@@ -80,6 +83,12 @@ test("validateGateway: rejects names colliding with built-in providers", () => {
 test("validateGateway: rejects bad baseUrl / empty key", () => {
   assert.ok(validateGateway({ name: "gw", baseUrl: "ftp://x", apiKey: "sk-1" }));
   assert.ok(validateGateway({ name: "gw", baseUrl: "https://x/v1", apiKey: "" }));
+});
+
+test("validateGateway: accepts auto API routing and rejects unknown modes", () => {
+  assert.equal(validateGateway({ name: "gw", baseUrl: "https://x/v1", apiKey: "sk-1", apiRouting: "auto" }), null);
+  const invalid = { name: "gw", baseUrl: "https://x/v1", apiKey: "sk-1", apiRouting: "random" } as unknown as Parameters<typeof validateGateway>[0];
+  assert.match(validateGateway(invalid) ?? "", /apiRouting/);
 });
 
 // ---------------------------------------------------------------------------
@@ -153,6 +162,21 @@ function makeFixtureDir(): string {
   return dir;
 }
 
+function makeOpenAIResponsesFixtureDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-openai-test-"));
+  fs.writeFileSync(
+    path.join(dir, "openai.json"),
+    JSON.stringify({
+      "openai-responses": {
+        "gpt-5.6-sol": { id: "gpt-5.6-sol", provider: "openai", api: "openai-responses" },
+        "gpt-oss-120b": { id: "gpt-oss-120b", provider: "proxy", api: "openai-responses" },
+        "chat-only": { id: "chat-only", provider: "openai", api: "openai-completions" },
+      },
+    }),
+  );
+  return dir;
+}
+
 test("buildCatalogIndex: picks the fullest entry for duplicate ids", () => {
   const catalog = buildCatalogIndex(makeFixtureDir());
   const alpha = catalog.get("alpha");
@@ -179,6 +203,33 @@ test("buildCatalogIndex: supports object shape { apiType: { id: entry } }", () =
 
 test("buildCatalogIndex: missing directory returns empty", () => {
   assert.equal(buildCatalogIndex("/nonexistent/dir").size, 0);
+});
+
+test("buildOpenAIResponsesModelIds: reads only canonical OpenAI Responses models", () => {
+  const ids = buildOpenAIResponsesModelIds(makeOpenAIResponsesFixtureDir());
+  assert.deepEqual([...ids], ["gpt-5.6-sol"]);
+  assert.equal(ids.has("gpt-oss-120b"), false);
+  assert.equal(ids.has("chat-only"), false);
+});
+
+test("buildOpenAIResponsesModelIds: missing or malformed catalog safely returns empty", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-openai-test-"));
+  assert.equal(buildOpenAIResponsesModelIds(dir).size, 0);
+  fs.writeFileSync(path.join(dir, "openai.json"), "{ broken json");
+  assert.equal(buildOpenAIResponsesModelIds(dir).size, 0);
+});
+
+test("resolveModelApi: auto routes canonical OpenAI models and keeps other models on completions", () => {
+  const ids = new Set(["gpt-5.6-sol"]);
+  assert.equal(resolveModelApi({ apiRouting: "auto" }, "gpt-5.6-sol", ids), "openai-responses");
+  assert.equal(resolveModelApi({ apiRouting: "auto" }, "claude-sonnet-4-6", ids), "openai-completions");
+  assert.equal(resolveModelApi({ apiRouting: "auto" }, "gpt-oss-120b", ids), "openai-completions");
+});
+
+test("resolveModelApi: explicit gateway API takes precedence over automatic routing", () => {
+  const ids = new Set(["gpt-5.6-sol"]);
+  assert.equal(resolveModelApi({ api: "openai-completions", apiRouting: "auto" }, "gpt-5.6-sol", ids), "openai-completions");
+  assert.equal(resolveModelApi({ api: "openai-responses" }, "claude-sonnet-4-6", ids), "openai-responses");
 });
 
 test("borrowMeta: borrows metadata for known models", () => {
@@ -403,6 +454,115 @@ test("registerGateway: applies live /api/pricing and lets a manual cost override
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("registerGateway: auto routes OpenAI models while preserving pricing and completions defaults", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-routing-"));
+  const previousFetch = globalThis.fetch;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  let registeredConfig: {
+    api?: string;
+    models: Array<{ id: string; api?: string; cost: unknown }>;
+  } | undefined;
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({
+        data: [{ id: "gpt-5.6-sol" }, { id: "claude-sonnet-4-6" }, { id: "gpt-oss-120b" }],
+      }));
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const pi = {
+      registerProvider(_name: string, config: typeof registeredConfig) {
+        registeredConfig = config;
+      },
+    } as unknown as Parameters<typeof registerGateway>[0];
+
+    const result = await registerGateway(
+      pi,
+      {
+        name: "gw",
+        baseUrl: "https://gateway.example/v1",
+        apiKey: "sk-test",
+        apiRouting: "auto",
+      },
+      new Map(),
+      {},
+      new Set(["gpt-5.6-sol"]),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(registeredConfig?.api, "openai-completions");
+    assert.equal(registeredConfig?.models.find((model) => model.id === "gpt-5.6-sol")?.api, "openai-responses");
+    assert.equal(registeredConfig?.models.find((model) => model.id === "claude-sonnet-4-6")?.api, undefined);
+    assert.equal(registeredConfig?.models.find((model) => model.id === "gpt-oss-120b")?.api, undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("registerGateway: explicit API disables automatic per-model routing", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-routing-"));
+  const previousFetch = globalThis.fetch;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  let registeredConfig: { api?: string; models: Array<{ id: string; api?: string }> } | undefined;
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/v1/models")) {
+      return new Response(JSON.stringify({ data: [{ id: "gpt-5.6-sol" }] }));
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const pi = {
+      registerProvider(_name: string, config: typeof registeredConfig) {
+        registeredConfig = config;
+      },
+    } as unknown as Parameters<typeof registerGateway>[0];
+
+    const result = await registerGateway(
+      pi,
+      {
+        name: "gw",
+        baseUrl: "https://gateway.example/v1",
+        apiKey: "sk-test",
+        api: "openai-completions",
+        apiRouting: "auto",
+      },
+      new Map(),
+      {},
+      new Set(["gpt-5.6-sol"]),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(registeredConfig?.api, "openai-completions");
+    assert.equal(registeredConfig?.models[0]?.api, undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createGatewayConfig: new gateways default to automatic API routing", () => {
+  assert.deepEqual(createGatewayConfig("  new-gateway  ", " https://x/v1 ", " sk-test "), {
+    name: "new-gateway",
+    baseUrl: "https://x/v1",
+    apiKey: "sk-test",
+    apiRouting: "auto",
+  });
 });
 
 // ---------------------------------------------------------------------------

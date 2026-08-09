@@ -5,6 +5,7 @@
  *   - Automatically fetches {baseUrl}/v1/models at startup for the model list
  *   - Borrows capabilities from Pi's built-in model catalog
  *   - Uses gateway-published /api/pricing when available; optional presets fill missing prices
+ *   - Optionally routes canonical OpenAI models through the Responses API
  *   - Models missing from the catalog get safe defaults without blocking registration
  *   - Automatically filters out non-chat models (image/embedding/audio/tts/rerank)
  *   - Per-gateway failure isolation + cache fallback, Pi startup never breaks
@@ -47,6 +48,9 @@ const DEFAULT_AGENT_DIR = path.join(".pi", "agent");
 const FETCH_TIMEOUT_MS = 8000;
 const NOISE_PATTERN = /image|embedding|audio|tts|rerank|dall-e|whisper/i;
 const DEFAULT_API = "openai-completions";
+const OPENAI_RESPONSES_API = "openai-responses";
+const OPENAI_CATALOG_FILENAME = "openai.json";
+const DEFAULT_API_ROUTING = "auto";
 const DEFAULT_CONTEXT_WINDOW = 128000;
 const DEFAULT_MAX_TOKENS = 16384;
 const PRICING_FETCH_TIMEOUT_MS = 5000;
@@ -97,11 +101,16 @@ const BUILTIN_PROVIDERS = new Set([
 // Section 1: config — read/write ~/.pi/agent/ai-gateway.json
 // ===========================================================================
 
+export type ApiRoutingMode = "auto";
+
 export interface GatewayConfig {
   name: string;
   baseUrl: string;
   apiKey: string;
+  /** Optional gateway-wide API override. Takes precedence over apiRouting. */
   api?: string;
+  /** Per-model protocol routing. New gateways default to "auto". */
+  apiRouting?: ApiRoutingMode;
   headers?: Record<string, string>;
   /** Optional fallback source used only when the gateway does not publish a model price. */
   pricePreset?: PricePreset;
@@ -161,6 +170,9 @@ export function validateGateway(gw: GatewayConfig): string | null {
   }
   if (gw.api !== undefined && typeof gw.api !== "string") {
     return "api must be a string";
+  }
+  if (gw.apiRouting !== undefined && gw.apiRouting !== "auto") {
+    return 'apiRouting must be "auto"';
   }
   if (gw.pricePreset !== undefined && gw.pricePreset !== "models-dev" && gw.pricePreset !== "basellm") {
     return 'pricePreset must be "models-dev" or "basellm"';
@@ -264,6 +276,37 @@ export function findPiAiDataDir(): string | null {
     }
   }
   return null;
+}
+
+/** Read canonical OpenAI model ids that Pi declares for the standard Responses API. */
+export function buildOpenAIResponsesModelIds(dataDir: string): Set<string> {
+  const ids = new Set<string>();
+  const file = path.join(dataDir, OPENAI_CATALOG_FILENAME);
+  if (!fs.existsSync(file)) return ids;
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return ids;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return ids;
+
+  for (const bucket of Object.values(raw as Record<string, unknown>)) {
+    const entries = Array.isArray(bucket)
+      ? bucket
+      : bucket !== null && typeof bucket === "object"
+        ? Object.values(bucket as Record<string, unknown>)
+        : [];
+    for (const entry of entries) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const model = entry as { id?: unknown; api?: unknown; provider?: unknown };
+      if (model.provider === "openai" && model.api === OPENAI_RESPONSES_API && typeof model.id === "string") {
+        ids.add(model.id);
+      }
+    }
+  }
+  return ids;
 }
 
 /** Metadata completeness score: when the same id appears under multiple providers, pick the fullest entry. */
@@ -467,10 +510,25 @@ export function saveCache(cache: Record<string, string[]>): void {
   }
 }
 
-function toProviderModel(id: string, meta: ModelMeta): ProviderModelConfig {
+export function resolveModelApi(
+  gateway: Pick<GatewayConfig, "api" | "apiRouting">,
+  modelId: string,
+  openAIResponsesModelIds: ReadonlySet<string>,
+): ProviderConfig["api"] {
+  if (gateway.api !== undefined) return gateway.api as ProviderConfig["api"];
+  if (gateway.apiRouting === "auto" && openAIResponsesModelIds.has(modelId)) return OPENAI_RESPONSES_API;
+  return DEFAULT_API;
+}
+
+function toProviderModel(
+  id: string,
+  meta: ModelMeta,
+  apiOverride?: ProviderConfig["api"],
+): ProviderModelConfig {
   return {
     id,
     name: meta.name ?? id,
+    ...(apiOverride ? { api: apiOverride } : {}),
     reasoning: meta.reasoning,
     ...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
     input: meta.input,
@@ -498,6 +556,7 @@ export async function registerGateway(
   gw: GatewayConfig,
   catalog: Map<string, ModelMeta>,
   cache: Record<string, string[]>,
+  openAIResponsesModelIds: ReadonlySet<string> = new Set(),
 ): Promise<RegisterResult> {
   let ids: string[];
   let degraded = false;
@@ -524,20 +583,22 @@ export async function registerGateway(
     fetchGatewayPrices(gw),
     fetchPresetPrices(gw.pricePreset, filtered),
   ]);
+  const providerApi = (gw.api as ProviderConfig["api"]) ?? DEFAULT_API;
   const models = filtered.map((id) => {
     const override = gw.overrides?.[id];
     const meta = applyOverrides(id, borrowMeta(catalog, id), gw.overrides);
+    const modelApi = resolveModelApi(gw, id, openAIResponsesModelIds);
     return toProviderModel(id, {
       ...meta,
       cost: resolveModelCost(id, gatewayPrices, presetPrices, override?.cost),
-    });
+    }, modelApi === providerApi ? undefined : modelApi);
   });
 
   const config: ProviderConfig = {
     name: gw.name,
     baseUrl: normalizeBaseUrl(gw.baseUrl),
     apiKey: gw.apiKey,
-    api: (gw.api as ProviderConfig["api"]) ?? DEFAULT_API,
+    api: providerApi,
     ...(gw.headers && Object.keys(gw.headers).length > 0 ? { headers: gw.headers } : {}),
     models,
   };
@@ -791,8 +852,9 @@ async function overridesCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, 
 async function reregister(pi: ExtensionAPI, gw: GatewayConfig, ctx: ExtensionCommandContext): Promise<void> {
   ctx.ui.setStatus("ai-gateway", `Re-registering ${gw.name}...`);
   try {
-    const catalog = buildCatalogIndex(findPiAiDataDir() ?? "");
-    const result = await registerGateway(pi, gw, catalog, loadCache());
+    const dataDir = findPiAiDataDir() ?? "";
+    const catalog = buildCatalogIndex(dataDir);
+    const result = await registerGateway(pi, gw, catalog, loadCache(), buildOpenAIResponsesModelIds(dataDir));
     if (result.ok) {
       ctx.ui.notify(
         `Gateway "${gw.name}" re-registered: ${result.modelCount} models` + (result.degraded ? " (cache degraded)" : ""),
@@ -926,6 +988,15 @@ function stripRedundant(
   return cleaned;
 }
 
+export function createGatewayConfig(name: string, baseUrl: string, apiKey: string): GatewayConfig {
+  return {
+    name: name.trim(),
+    baseUrl: baseUrl.trim(),
+    apiKey: apiKey.trim(),
+    apiRouting: DEFAULT_API_ROUTING,
+  };
+}
+
 async function addGateway(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   const { ui } = ctx;
   if (!ctx.hasUI) {
@@ -942,7 +1013,7 @@ async function addGateway(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
   const apiKey = await ui.input("API Key (written to the local config file, permissions 600)");
   if (!apiKey) return;
 
-  const gw: GatewayConfig = { name: name.trim(), baseUrl: baseUrlInput.trim(), apiKey: apiKey.trim() };
+  const gw = createGatewayConfig(name, baseUrlInput, apiKey);
   const err = validateGateway(gw);
   if (err) {
     ui.notify(`Invalid config: ${err}`, "error");
@@ -961,8 +1032,9 @@ async function addGateway(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 
   ui.setStatus("ai-gateway", `Registering ${gw.name}...`);
   try {
-    const catalog = buildCatalogIndex(findPiAiDataDir() ?? "");
-    const result = await registerGateway(pi, gw, catalog, loadCache());
+    const dataDir = findPiAiDataDir() ?? "";
+    const catalog = buildCatalogIndex(dataDir);
+    const result = await registerGateway(pi, gw, catalog, loadCache(), buildOpenAIResponsesModelIds(dataDir));
     if (result.ok) {
       ui.notify(
         `Gateway "${gw.name}" registered: ${result.modelCount} models` + (result.degraded ? " (using cache, gateway currently unreachable)" : ""),
@@ -1009,6 +1081,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     console.warn("[ai-gateway] pi-ai built-in model catalog not found; all models will use default metadata");
   }
   const catalog = buildCatalogIndex(dataDir ?? "");
+  const openAIResponsesModelIds = buildOpenAIResponsesModelIds(dataDir ?? "");
   const cache = loadCache();
 
   for (const gw of config.gateways) {
@@ -1018,7 +1091,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       continue;
     }
     try {
-      const result = await registerGateway(pi, gw, catalog, cache);
+      const result = await registerGateway(pi, gw, catalog, cache, openAIResponsesModelIds);
       if (result.ok) {
         console.log(
           `[ai-gateway] Registered "${result.gateway}": ${result.modelCount} models` +

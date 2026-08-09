@@ -5,6 +5,7 @@
 把任意 OpenAI 兼容网关（newapi、one-api、自建代理等）注册为 [Pi](https://pi.dev) 的 provider。
 
 - **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`，网关里新增模型自动出现
+- **自动协议路由**：新建网关默认让 Pi 官方 OpenAI 模型走 `/v1/responses`，其他模型走 `/v1/chat/completions`
 - **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
 - **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格
 - **可选价格预设**：网关缺少某模型价格时，可按网关显式选择 Models.dev 或 BaseLLM；手动价格始终最高优先级
@@ -35,25 +36,35 @@ pi install ./pi-ai-gateway
       "name": "newapi",
       "baseUrl": "https://your-gateway.example.com/v1",
       "apiKey": "sk-你的密钥",
+      "apiRouting": "auto",
       "pricePreset": "models-dev"
     }
   ]
 }
 ```
 
-`pricePreset` 是可选项；如果只希望使用网关自己公布的价格，可以省略。
+`apiRouting: "auto"` 是 `/ai-gateway add` 创建新网关时的默认值：Pi 官方 `openai.json` 中声明为 `openai-responses` 的模型使用 `/v1/responses`，其余模型继续使用 `/v1/chat/completions`。`pricePreset` 是可选项；如果只希望使用网关自己公布的价格，可以省略。
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `name` | ✅ | provider 名，模型显示为 `newapi/gpt-5.6-sol`；不能与 Pi 内置 provider 重名 |
 | `baseUrl` | ✅ | 网关地址；缺 `/v1` 会自动补 |
 | `apiKey` | ✅ | 直接写密钥（也支持 `$ENV` 引用语法） |
-| `api` | ❌ | 默认 `openai-completions` |
+| `api` | ❌ | 强制整个网关使用一种 Pi API 类型；设置后优先于 `apiRouting` |
+| `apiRouting` | ❌ | `"auto"`：OpenAI 官方 Responses 模型走 `openai-responses`，其他模型走 `openai-completions`；通过 `/ai-gateway add` 新建时默认写入 |
 | `headers` | ❌ | 附加请求头 |
 | `pricePreset` | ❌ | 缺失价格回退：`"models-dev"` 或 `"basellm"`；省略时只采用网关价格 |
 | `overrides` | ❌ | 按模型覆盖元数据及手动价格（见下） |
 
-配置完成后重启 Pi，`/model` 里即可看到 `newapi/` 前缀的全部模型。
+协议选择优先级：
+
+```text
+显式 api > apiRouting: "auto" > openai-completions
+```
+
+自动识别依据是 Pi 自带的 `openai.json`，不是 `gpt-` 前缀，因此 `gpt-oss-*` 和未登记的网关别名默认仍走 Chat Completions。普通 API Key 网关使用的是 `openai-responses`，不是 `openai-codex-responses`。网关如果不支持 `/v1/responses`，可显式设置 `"api": "openai-completions"`。
+
+配置完成后重启 Pi，`/model` 里即可看到对应 provider 前缀的全部模型。
 
 > 密钥安全：配置文件在仓库外，权限自动设为 600。仓库里只有 `ai-gateway.example.json`（占位符，零密钥），请勿提交真实配置文件。
 
@@ -157,13 +168,15 @@ pi install ./pi-ai-gateway
   1. GET {baseUrl}/v1/models            → 模型名单
   2. GET {网关根地址}/api/pricing       → 网关价格（尽力获取）
   3. 索引 Pi 内置目录 providers/data/*.json → 能力档案库
-  4. 每个模型 id 借能力元数据：
+  4. 从 Pi 官方 openai.json 建立 Responses 模型集合
+  5. 每个模型 id 借能力元数据：
      reasoning / thinkingLevelMap / contextWindow / maxTokens / compat
      找不到 → 安全默认值（无思考、128K）
-  5. 解析价格：手动 > 网关 > 已选预设 > $0
-  6. 合并其他用户覆盖
-  7. 自动过滤 image/embedding/audio/tts/rerank 类模型
-  8. 注册为 provider：newapi/gpt-5.6-sol
+  6. 解析价格：手动 > 网关 > 已选预设 > $0
+  7. 合并其他用户覆盖
+  8. 选择协议：官方 OpenAI Responses 模型 → /v1/responses；其他模型 → /v1/chat/completions
+  9. 自动过滤 image/embedding/audio/tts/rerank 类模型
+  10. 注册为 provider：newapi/gpt-5.6-sol
 ```
 
 ### 配置文件 vs 缓存文件

@@ -1,6 +1,6 @@
 {
   "name": "pi-ai-gateway",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Register any OpenAI-compatible gateway (newapi, one-api, ...) as Pi providers with automatic model discovery and built-in metadata borrowing.",
   "keywords": ["pi-package"],
   "license": "MIT",

@@ -5,6 +5,7 @@
 Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ...) as a [Pi](https://pi.dev) provider.
 
 - **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup — new models added on the gateway appear automatically
+- **Automatic protocol routing**: newly added gateways send canonical OpenAI models to `/v1/responses` and other models to `/v1/chat/completions`
 - **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
 - **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers
 - **Optional price presets**: when a gateway does not publish a model price, opt into Models.dev or BaseLLM defaults per gateway; manual prices always win
@@ -35,25 +36,35 @@ Create `~/.pi/agent/ai-gateway.json` (template: `ai-gateway.example.json`):
       "name": "newapi",
       "baseUrl": "https://your-gateway.example.com/v1",
       "apiKey": "sk-your-key",
+      "apiRouting": "auto",
       "pricePreset": "models-dev"
     }
   ]
 }
 ```
 
-`pricePreset` is optional; omit it if you only want prices published by the gateway itself.
+`apiRouting: "auto"` is the default written by `/ai-gateway add`: models declared as `openai-responses` in Pi's canonical `openai.json` use `/v1/responses`, while all other models continue to use `/v1/chat/completions`. `pricePreset` is optional; omit it if you only want prices published by the gateway itself.
 
 | Field | Required | Description |
 |---|---|---|
 | `name` | ✅ | Provider name; models appear as `newapi/gpt-5.6-sol`. Must not collide with built-in Pi providers |
 | `baseUrl` | ✅ | Gateway URL; `/v1` is appended automatically if missing |
 | `apiKey` | ✅ | Write the key directly (the `$ENV` reference syntax is also supported) |
-| `api` | ❌ | Defaults to `openai-completions` |
+| `api` | ❌ | Force one Pi API type for the whole gateway; takes precedence over `apiRouting` |
+| `apiRouting` | ❌ | `"auto"`: canonical OpenAI Responses models use `openai-responses`, other models use `openai-completions`; written by default for gateways created with `/ai-gateway add` |
 | `headers` | ❌ | Extra request headers |
 | `pricePreset` | ❌ | Missing-price fallback: `"models-dev"` or `"basellm"`; omitted means gateway prices only |
 | `overrides` | ❌ | Per-model metadata and manual price overrides (see below) |
 
-Restart Pi after configuring; all models will appear under `/model` with the `newapi/` prefix.
+Protocol precedence:
+
+```text
+explicit api > apiRouting: "auto" > openai-completions
+```
+
+Automatic detection uses Pi's bundled `openai.json`, not a `gpt-` name prefix, so `gpt-oss-*` and unregistered gateway aliases stay on Chat Completions by default. Regular API-key gateways use `openai-responses`, not `openai-codex-responses`. If the gateway does not support `/v1/responses`, set `"api": "openai-completions"` explicitly.
+
+Restart Pi after configuring; all models will appear under `/model` with the configured provider prefix.
 
 > Key security: the config file lives outside the repo and is chmod 600 automatically. Only `ai-gateway.example.json` (placeholders, zero secrets) is committed. Never commit the real config file.
 
@@ -157,13 +168,15 @@ At startup, for each gateway:
   1. GET {baseUrl}/v1/models                  → model list
   2. GET {gatewayRoot}/api/pricing            → gateway prices (best effort)
   3. Index Pi's built-in catalog providers/data/*.json → capability knowledge base
-  4. For each model id, borrow capabilities:
+  4. Build a Responses-model set from Pi's canonical openai.json
+  5. For each model id, borrow capabilities:
      reasoning / thinkingLevelMap / contextWindow / maxTokens / compat
      Not found → safe defaults (no thinking, 128K)
-  5. Resolve price: manual > gateway > selected preset > $0
-  6. Merge remaining user overrides
-  7. Filter out image/embedding/audio/tts/rerank models
-  8. Register as provider: newapi/gpt-5.6-sol
+  6. Resolve price: manual > gateway > selected preset > $0
+  7. Merge remaining user overrides
+  8. Choose protocol: canonical OpenAI Responses models → /v1/responses; other models → /v1/chat/completions
+  9. Filter out image/embedding/audio/tts/rerank models
+  10. Register as provider: newapi/gpt-5.6-sol
 ```
 
 ### Config file vs cache file
