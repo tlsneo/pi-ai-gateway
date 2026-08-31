@@ -11,7 +11,7 @@
  *   - Per-gateway failure isolation + cache fallback, Pi startup never breaks
  *
  * Config: ~/.pi/agent/ai-gateway.json (see ai-gateway.example.json)
- * Commands: /ai-gateway add|list|remove|test|overrides|set-price
+ * Commands: /ai-gateway add|list|fetch|remove|test|overrides|set-price
  */
 
 import fs from "node:fs";
@@ -445,6 +445,10 @@ async function fetchGatewayPrices(gw: GatewayConfig): Promise<PriceCatalog> {
 
 const presetPayloads = new Map<PricePreset, Promise<unknown>>();
 
+export function clearPresetPriceCache(): void {
+  presetPayloads.clear();
+}
+
 async function fetchPresetPayload(preset: PricePreset): Promise<unknown> {
   const existing = presetPayloads.get(preset);
   if (existing) return existing;
@@ -605,8 +609,7 @@ export async function registerGateway(
 
   pi.registerProvider(gw.name, config);
 
-  const nextCache = { ...cache, [gw.name]: filtered };
-  saveCache(nextCache);
+  saveCache({ ...loadCache(), [gw.name]: filtered });
 
   return { ok: true, gateway: gw.name, modelCount: models.length, degraded };
 }
@@ -624,6 +627,11 @@ async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: ExtensionComm
       return addGateway(pi, ctx);
     case "list":
       return listGateways(ctx);
+    case "fetch":
+    case "update":
+    case "refresh":
+      await refreshGateways(pi, ctx, rest[0]);
+      return;
     case "remove": {
       const name = rest[0];
       if (!name) {
@@ -668,7 +676,76 @@ async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: ExtensionComm
     case "set-price":
       return setPriceCommand(pi, ctx, rest);
     default:
-      ui.notify("Usage: /ai-gateway add | list | remove <name> | test <name> | overrides [...] | set-price [...]", "info");
+      ui.notify("Usage: /ai-gateway add | list | fetch [name] | remove <name> | test <name> | overrides [...] | set-price [...]", "info");
+  }
+}
+
+export interface RefreshResult {
+  requested: number;
+  ok: number;
+  failed: number;
+  modelCount: number;
+}
+
+export async function refreshGateways(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  name?: string,
+): Promise<RefreshResult> {
+  const config = loadConfig();
+  if (config.gateways.length === 0) {
+    ctx.ui.notify("No gateways configured. Run /ai-gateway add first", "warning");
+    return { requested: 0, ok: 0, failed: 0, modelCount: 0 };
+  }
+
+  const targetName = name?.trim();
+  const targets = targetName ? config.gateways.filter((g) => g.name === targetName) : config.gateways;
+  if (targetName && targets.length === 0) {
+    ctx.ui.notify(`Gateway "${targetName}" is not in the config`, "warning");
+    return { requested: 0, ok: 0, failed: 0, modelCount: 0 };
+  }
+
+  clearPresetPriceCache();
+  const dataDir = findPiAiDataDir() ?? "";
+  const catalog = buildCatalogIndex(dataDir);
+  const openAIResponsesModelIds = buildOpenAIResponsesModelIds(dataDir);
+  const summary: RefreshResult = { requested: targets.length, ok: 0, failed: 0, modelCount: 0 };
+
+  ctx.ui.setStatus("ai-gateway", `Fetching ${targetName ?? `${targets.length} gateways`}...`);
+  try {
+    for (const gw of targets) {
+      const err = validateGateway(gw);
+      if (err) {
+        summary.failed += 1;
+        ctx.ui.notify(`Skipping gateway "${gw.name ?? "(unnamed)"}": ${err}`, "error");
+        continue;
+      }
+
+      const result = await registerGateway(pi, gw, catalog, loadCache(), openAIResponsesModelIds);
+      if (result.ok) {
+        summary.ok += 1;
+        summary.modelCount += result.modelCount;
+        ctx.ui.notify(
+          `Gateway "${result.gateway}" refreshed: ${result.modelCount} models/prices` +
+            (result.degraded ? " (models from cache)" : ""),
+          result.degraded ? "warning" : "info",
+        );
+      } else {
+        summary.failed += 1;
+        ctx.ui.notify(`Gateway "${result.gateway}" refresh failed: ${result.error}`, "error");
+      }
+    }
+
+    if (targets.length > 1) {
+      ctx.ui.notify(
+        `Fetch complete: ${summary.ok}/${summary.requested} gateways, ${summary.modelCount} models` +
+          (summary.failed ? `, ${summary.failed} failed` : ""),
+        summary.failed ? "warning" : "info",
+      );
+    }
+    return summary;
+  } finally {
+    ctx.ui.setStatus("ai-gateway", undefined);
   }
 }
 
@@ -1059,7 +1136,7 @@ async function listGateways(ctx: ExtensionCommandContext): Promise<void> {
     const cached = cache[g.name];
     const modelInfo = cached && cached.length > 0 ? `${cached.length} models (cached)` : "not fetched";
     const priceInfo = g.pricePreset ? `price fallback ${g.pricePreset}` : "gateway prices only";
-    return `• ${g.name} → ${normalizeBaseUrl(g.baseUrl)}（${modelInfo}; ${priceInfo}）`;
+    return `• ${g.name} → ${normalizeBaseUrl(g.baseUrl)}（${modelInfo}; ${priceInfo}; fetch: /ai-gateway fetch ${g.name}）`;
   });
   ctx.ui.notify(`${config.gateways.length} gateways configured:\n${lines.join("\n")}`, "info");
 }

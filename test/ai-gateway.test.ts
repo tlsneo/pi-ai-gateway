@@ -12,9 +12,11 @@ import {
   configPath,
   createGatewayConfig,
   filterModelIds,
+  loadCache,
   loadConfig,
   normalizeBaseUrl,
   parseGatewayConfig,
+  refreshGateways,
   registerGateway,
   resolveModelApi,
   saveConfig,
@@ -448,6 +450,71 @@ test("registerGateway: applies live /api/pricing and lets a manual cost override
       cacheRead: 1,
       cacheWrite: 2,
     });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("refreshGateways: refetches models and fallback prices without restart", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-refresh-"));
+  const previousFetch = globalThis.fetch;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  let modelFetches = 0;
+  let presetFetches = 0;
+  let registeredModels: Array<{ id: string; cost: { input: number } }> = [];
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === "https://gateway.example/v1/models") {
+      modelFetches += 1;
+      return new Response(JSON.stringify({
+        data: modelFetches === 1
+          ? [{ id: "gpt-test" }]
+          : [{ id: "gpt-test" }, { id: "gpt-new" }],
+      }));
+    }
+    if (url === "https://models.dev/api.json") {
+      presetFetches += 1;
+      return new Response(JSON.stringify({
+        openai: {
+          models: {
+            "gpt-test": { cost: { input: presetFetches, output: presetFetches + 10, cache_read: 0, cache_write: 0 } },
+            "gpt-new": { cost: { input: 5, output: 6, cache_read: 0, cache_write: 0 } },
+          },
+        },
+      }));
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    saveConfig({ gateways: [{ name: "gw", baseUrl: "https://gateway.example/v1", apiKey: "sk-test", pricePreset: "models-dev" }] });
+    const pi = {
+      registerProvider(_name: string, config: { models: typeof registeredModels }) {
+        registeredModels = config.models;
+      },
+    } as unknown as Parameters<typeof refreshGateways>[0];
+    const ctx = {
+      hasUI: false,
+      ui: { notify() {}, setStatus() {} },
+    } as unknown as Parameters<typeof refreshGateways>[1];
+
+    const first = await refreshGateways(pi, ctx);
+    assert.equal(first.ok, 1);
+    assert.equal(first.modelCount, 1);
+    assert.equal(registeredModels.find((model) => model.id === "gpt-test")?.cost.input, 1);
+
+    const second = await refreshGateways(pi, ctx);
+    assert.equal(second.ok, 1);
+    assert.equal(second.modelCount, 2);
+    assert.equal(registeredModels.find((model) => model.id === "gpt-test")?.cost.input, 2);
+    assert.equal(registeredModels.find((model) => model.id === "gpt-new")?.cost.input, 5);
+    assert.equal(presetFetches, 2);
+    assert.deepEqual(loadCache(), { gw: ["gpt-test", "gpt-new"] });
   } finally {
     globalThis.fetch = previousFetch;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

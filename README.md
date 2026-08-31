@@ -4,7 +4,7 @@
 
 Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ...) as a [Pi](https://pi.dev) provider.
 
-- **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup — new models added on the gateway appear automatically
+- **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup; run `/ai-gateway fetch` anytime to refresh models/prices without restart
 - **Automatic protocol routing**: newly added gateways send canonical OpenAI models to `/v1/responses` and other models to `/v1/chat/completions`
 - **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
 - **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers
@@ -126,6 +126,7 @@ With no arguments after `manual`, Pi prompts for the model and four rates. Manua
 ```
 /ai-gateway add           Interactive wizard (name → baseUrl → apiKey)
 /ai-gateway list          List configured gateways
+/ai-gateway fetch [name]  Refetch model list + prices for all gateways, or one gateway
 /ai-gateway remove <name> Remove a gateway
 /ai-gateway test <name>   Test connectivity + report model count
 /ai-gateway overrides     Show current per-model overrides
@@ -164,7 +165,7 @@ Or pass arguments directly to skip the prompts:
 ## How it works
 
 ```
-At startup, for each gateway:
+At startup, or when you run /ai-gateway fetch, for each gateway:
   1. GET {baseUrl}/v1/models                  → model list
   2. GET {gatewayRoot}/api/pricing            → gateway prices (best effort)
   3. Index Pi's built-in catalog providers/data/*.json → capability knowledge base
@@ -207,4 +208,5 @@ npm test        # node --test, pure-function unit tests
 | Startup log says `未配置网关` / no gateways configured | Run `/ai-gateway add` or create the config file |
 | `与 Pi 内置 provider 重名` / name collides with a built-in provider | Choose another `name` (e.g. `my-openai`) |
 | Gateway failed to register but Pi started fine | Check the startup log; a cached model list is used automatically (marked "cache degraded") |
+| Models/prices look stale | Run `/ai-gateway fetch` (or `/ai-gateway fetch <name>`) |
 | A model has no thinking levels | It's not in the built-in catalog — normal (defaults apply). Run `pi update --models` and restart |

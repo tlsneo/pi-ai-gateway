@@ -4,7 +4,7 @@
 
 把任意 OpenAI 兼容网关（newapi、one-api、自建代理等）注册为 [Pi](https://pi.dev) 的 provider。
 
-- **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`，网关里新增模型自动出现
+- **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`；也可随时 `/ai-gateway fetch` 刷新模型和价格，无需重启
 - **自动协议路由**：新建网关默认让 Pi 官方 OpenAI 模型走 `/v1/responses`，其他模型走 `/v1/chat/completions`
 - **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
 - **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格
@@ -126,6 +126,7 @@ pi install ./pi-ai-gateway
 ```
 /ai-gateway add          交互向导添加网关（name → baseUrl → apiKey）
 /ai-gateway list         列出已配置网关
+/ai-gateway fetch [name]  重新拉取全部网关或单个网关的模型列表和价格
 /ai-gateway remove <name> 移除网关
 /ai-gateway test <name>   测试连通性 + 报告模型数
 /ai-gateway overrides     查看当前网关的模型覆盖
@@ -164,7 +165,7 @@ pi install ./pi-ai-gateway
 ## 工作原理
 
 ```
-启动时，对每个网关：
+启动时，或运行 /ai-gateway fetch 时，对每个网关：
   1. GET {baseUrl}/v1/models            → 模型名单
   2. GET {网关根地址}/api/pricing       → 网关价格（尽力获取）
   3. 索引 Pi 内置目录 providers/data/*.json → 能力档案库
@@ -207,4 +208,5 @@ npm test        # node --test，纯函数单测
 | 启动日志 `未配置网关` | 运行 `/ai-gateway add` 或创建配置文件 |
 | `与 Pi 内置 provider 重名` | 换一个 `name`（如 `my-openai`） |
 | 网关注册失败但 Pi 正常启动 | 看启动日志错误；有缓存会自动降级（日志标注"缓存降级"） |
+| 模型/价格看起来还是旧的 | 运行 `/ai-gateway fetch`（或 `/ai-gateway fetch <name>`） |
 | 某模型没有思考档位 | 该模型不在内置目录，属正常（默认值）；`pi update --models` 更新目录后重启 |
