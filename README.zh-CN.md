@@ -4,6 +4,7 @@
 
 把任意 OpenAI 兼容网关（newapi、one-api、自建代理等）注册为 [Pi](https://pi.dev) 的 provider。
 
+- **交互式 TUI 菜单**：运行 `/ai-gateway`，不用记子命令也能管理网关
 - **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`；也可随时 `/ai-gateway fetch` 刷新模型和价格，无需重启
 - **自动协议路由**：新建网关默认让 Pi 官方 OpenAI 模型走 `/v1/responses`，其他模型走 `/v1/chat/completions`
 - **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
@@ -124,6 +125,9 @@ pi install ./pi-ai-gateway
 ## 命令
 
 ```
+/ai-gateway              打开交互式 TUI 菜单
+/ai-gateways             /ai-gateway 的别名
+/ai-getways              防手滑别名
 /ai-gateway add          交互向导添加网关（name → baseUrl → apiKey）
 /ai-gateway list         列出已配置网关
 /ai-gateway fetch [name]  重新拉取全部网关或单个网关的模型列表和价格

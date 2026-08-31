@@ -4,6 +4,7 @@
 
 Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ...) as a [Pi](https://pi.dev) provider.
 
+- **Interactive TUI menu**: run `/ai-gateway` to manage gateways without memorizing subcommands
 - **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup; run `/ai-gateway fetch` anytime to refresh models/prices without restart
 - **Automatic protocol routing**: newly added gateways send canonical OpenAI models to `/v1/responses` and other models to `/v1/chat/completions`
 - **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
@@ -124,6 +125,9 @@ With no arguments after `manual`, Pi prompts for the model and four rates. Manua
 ## Commands
 
 ```
+/ai-gateway               Open the interactive TUI menu
+/ai-gateways              Alias for /ai-gateway
+/ai-getways               Typo-friendly alias
 /ai-gateway add           Interactive wizard (name → baseUrl → apiKey)
 /ai-gateway list          List configured gateways
 /ai-gateway fetch [name]  Refetch model list + prices for all gateways, or one gateway

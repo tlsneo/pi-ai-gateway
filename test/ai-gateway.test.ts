@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import {
+import aiGatewayExtension, {
   applyOverrides,
   borrowMeta,
   buildCatalogIndex,
@@ -12,6 +12,7 @@ import {
   configPath,
   createGatewayConfig,
   filterModelIds,
+  gatewayCommand,
   loadCache,
   loadConfig,
   normalizeBaseUrl,
@@ -32,6 +33,61 @@ import {
   parseTieredBillingExpr,
   resolveModelCost,
 } from "../src/pricing.ts";
+
+// ---------------------------------------------------------------------------
+// command menu
+// ---------------------------------------------------------------------------
+
+test("extension: registers gateway menu aliases", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-alias-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousWarn = console.warn;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  console.warn = () => {};
+  const commands: string[] = [];
+
+  try {
+    await aiGatewayExtension({
+      registerCommand(name: string) {
+        commands.push(name);
+      },
+    } as unknown as Parameters<typeof aiGatewayExtension>[0]);
+
+    assert.deepEqual(commands, ["ai-gateway", "ai-gateways", "ai-getways"]);
+  } finally {
+    console.warn = previousWarn;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gatewayCommand: blank args opens an interactive menu", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-menu-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const menus: string[][] = [];
+
+  try {
+    await gatewayCommand({} as Parameters<typeof gatewayCommand>[0], "", {
+      hasUI: true,
+      ui: {
+        select: async (_title: string, options: string[]) => {
+          menus.push(options);
+          return undefined;
+        },
+        notify() {},
+        setStatus() {},
+      },
+    } as unknown as Parameters<typeof gatewayCommand>[2]);
+
+    assert.deepEqual(menus[0], ["Add gateway", "List gateways", "Help"]);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // parseGatewayConfig

@@ -11,7 +11,7 @@
  *   - Per-gateway failure isolation + cache fallback, Pi startup never breaks
  *
  * Config: ~/.pi/agent/ai-gateway.json (see ai-gateway.example.json)
- * Commands: /ai-gateway add|list|fetch|remove|test|overrides|set-price
+ * Commands: /ai-gateway menu|add|list|fetch|remove|test|overrides|set-price
  */
 
 import fs from "node:fs";
@@ -639,10 +639,11 @@ export async function registerGateway(
 // Section 4: index — extension entry point
 // ===========================================================================
 
-async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
-  const { ui } = ctx;
-  const [sub, ...rest] = args.trim().split(/\s+/);
+export async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const trimmed = args.trim();
+  if (!trimmed) return openGatewayMenu(pi, ctx);
 
+  const [sub, ...rest] = trimmed.split(/\s+/);
   switch (sub ?? "") {
     case "add":
       return addGateway(pi, ctx);
@@ -653,52 +654,161 @@ async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: ExtensionComm
     case "refresh":
       await refreshGateways(pi, ctx, rest[0]);
       return;
-    case "remove": {
-      const name = rest[0];
-      if (!name) {
-        ui.notify("Usage: /ai-gateway remove <name>", "warning");
-        return;
-      }
-      const config = loadConfig();
-      const next = config.gateways.filter((g) => g.name !== name);
-      if (next.length === config.gateways.length) {
-        ui.notify(`Gateway "${name}" does not exist`, "warning");
-        return;
-      }
-      saveConfig({ gateways: next });
-      ui.notify(`Removed gateway "${name}". Restart Pi for it to fully take effect`, "info");
-      return;
-    }
-    case "test": {
-      const name = rest[0];
-      if (!name) {
-        ui.notify("Usage: /ai-gateway test <name>", "warning");
-        return;
-      }
-      const gw = loadConfig().gateways.find((g) => g.name === name);
-      if (!gw) {
-        ui.notify(`Gateway "${name}" is not in the config`, "warning");
-        return;
-      }
-      ui.setStatus("ai-gateway", `Testing ${name}...`);
-      try {
-        const ids = await fetchModelIds(gw);
-        const filtered = filterModelIds(ids);
-        ui.notify(`Gateway "${name}" OK: ${ids.length} models total, ${filtered.length} usable`, "info");
-      } catch (e) {
-        ui.notify(`Gateway "${name}" connection failed: ${e instanceof Error ? e.message : String(e)}`, "error");
-      } finally {
-        ui.setStatus("ai-gateway", undefined);
-      }
-      return;
-    }
+    case "remove":
+      return removeGatewayCommand(ctx, rest[0]);
+    case "test":
+      return testGatewayCommand(ctx, rest[0]);
     case "overrides":
       return overridesCommand(pi, ctx, rest.join(" "));
     case "set-price":
       return setPriceCommand(pi, ctx, rest);
+    case "help":
+      return showGatewayHelp(ctx);
     default:
-      ui.notify("Usage: /ai-gateway add | list | fetch [name] | remove <name> | test <name> | overrides [...] | set-price [...]", "info");
+      return showGatewayHelp(ctx);
   }
+}
+
+function mainMenuChoices(): string[] {
+  return loadConfig().gateways.length === 0
+    ? ["Add gateway", "List gateways", "Help"]
+    : [
+      "Fetch models/prices",
+      "List gateways",
+      "Add gateway",
+      "Test gateway",
+      "Prices",
+      "Overrides",
+      "Remove gateway",
+      "Help",
+    ];
+}
+
+function gatewayMenuTitle(): string {
+  const config = loadConfig();
+  const cache = loadCache();
+  const lines = [
+    "AI Gateway",
+    "",
+    `Config: ${configPath()}`,
+    `Gateways: ${config.gateways.length}`,
+  ];
+  if (config.gateways.length === 0) {
+    lines.push("  none");
+  } else {
+    for (const gw of config.gateways) {
+      const cached = cache[gw.name];
+      lines.push(`  • ${gw.name}: ${cached?.length ?? 0} cached models`);
+    }
+  }
+  lines.push("", "Choose an action:");
+  return lines.join("\n");
+}
+
+async function openGatewayMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  if (!ctx.hasUI) return showGatewayHelp(ctx);
+
+  while (true) {
+    const choice = await ctx.ui.select(gatewayMenuTitle(), mainMenuChoices());
+    if (!choice) return;
+    if (choice === "Fetch models/prices") await refreshGatewaysFromMenu(pi, ctx);
+    if (choice === "List gateways") await listGateways(ctx);
+    if (choice === "Add gateway") await addGateway(pi, ctx);
+    if (choice === "Test gateway") await testGatewayCommand(ctx);
+    if (choice === "Prices") await openPriceMenu(pi, ctx);
+    if (choice === "Overrides") await openOverridesMenu(pi, ctx);
+    if (choice === "Remove gateway") await removeGatewayCommand(ctx);
+    if (choice === "Help") showGatewayHelp(ctx);
+  }
+}
+
+async function refreshGatewaysFromMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const gateways = loadConfig().gateways;
+  if (gateways.length <= 1) {
+    await refreshGateways(pi, ctx, gateways[0]?.name);
+    return;
+  }
+  const choice = await ctx.ui.select("Fetch models/prices", ["All gateways", ...gateways.map((g) => g.name)]);
+  if (!choice) return;
+  await refreshGateways(pi, ctx, choice === "All gateways" ? undefined : choice);
+}
+
+async function testGatewayCommand(ctx: ExtensionCommandContext, name?: string): Promise<void> {
+  if (!name && !ctx.hasUI) {
+    ctx.ui.notify("Usage: /ai-gateway test <name>", "warning");
+    return;
+  }
+  const gw = name ? loadConfig().gateways.find((g) => g.name === name) : await pickGateway(ctx);
+  if (!gw) {
+    if (name) ctx.ui.notify(`Gateway "${name}" is not in the config`, "warning");
+    return;
+  }
+
+  ctx.ui.setStatus("ai-gateway", `Testing ${gw.name}...`);
+  try {
+    const ids = await fetchModelIds(gw);
+    const filtered = filterModelIds(ids);
+    ctx.ui.notify(`Gateway "${gw.name}" OK: ${ids.length} models total, ${filtered.length} usable`, "info");
+  } catch (e) {
+    ctx.ui.notify(`Gateway "${gw.name}" connection failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+  } finally {
+    ctx.ui.setStatus("ai-gateway", undefined);
+  }
+}
+
+async function removeGatewayCommand(ctx: ExtensionCommandContext, name?: string): Promise<void> {
+  if (!name && !ctx.hasUI) {
+    ctx.ui.notify("Usage: /ai-gateway remove <name>", "warning");
+    return;
+  }
+  const gw = name ? loadConfig().gateways.find((g) => g.name === name) : await pickGateway(ctx);
+  if (!gw) {
+    if (name) ctx.ui.notify(`Gateway "${name}" does not exist`, "warning");
+    return;
+  }
+  if (!name && !(await ctx.ui.confirm(`Remove gateway: ${gw.name}`, "Remove it from ai-gateway.json?"))) return;
+
+  const config = loadConfig();
+  saveConfig({ gateways: config.gateways.filter((g) => g.name !== gw.name) });
+  ctx.ui.notify(`Removed gateway "${gw.name}". Restart Pi for it to fully take effect`, "info");
+}
+
+async function openPriceMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  if (!ctx.hasUI) return setPriceCommand(pi, ctx, []);
+  const choice = await ctx.ui.select("AI Gateway prices", [
+    "Show prices",
+    "Set fallback preset",
+    "Set manual model price",
+    "Remove manual model price",
+  ]);
+  if (choice === "Show prices") await setPriceCommand(pi, ctx, ["show"]);
+  if (choice === "Set fallback preset") await setPriceCommand(pi, ctx, ["preset"]);
+  if (choice === "Set manual model price") await setPriceCommand(pi, ctx, ["manual"]);
+  if (choice === "Remove manual model price") await setPriceCommand(pi, ctx, ["remove"]);
+}
+
+async function openOverridesMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  if (!ctx.hasUI) return overridesCommand(pi, ctx, "");
+  const choice = await ctx.ui.select("AI Gateway overrides", ["List overrides", "Add override", "Remove override"]);
+  if (choice === "List overrides") await overridesCommand(pi, ctx, "list");
+  if (choice === "Add override") await overridesCommand(pi, ctx, "add");
+  if (choice === "Remove override") await overridesCommand(pi, ctx, "remove");
+}
+
+function showGatewayHelp(ctx: ExtensionCommandContext): void {
+  ctx.ui.notify(
+    "Usage:\n" +
+      "  /ai-gateway                 Open interactive menu\n" +
+      "  /ai-gateway add             Add gateway\n" +
+      "  /ai-gateway list            List gateways\n" +
+      "  /ai-gateway fetch [name]    Refetch models/prices\n" +
+      "  /ai-gateway test <name>     Test gateway\n" +
+      "  /ai-gateway remove <name>   Remove gateway\n" +
+      "  /ai-gateway overrides       Model metadata overrides\n" +
+      "  /ai-gateway set-price       Prices and presets\n" +
+      "Aliases: /ai-gateways, /ai-getways",
+    "info",
+  );
 }
 
 export interface RefreshResult {
@@ -848,12 +958,20 @@ async function setPriceCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, a
       return;
     }
     case "remove": {
-      const modelId = rest[0];
+      const overrides = { ...(gw.overrides ?? {}) };
+      let modelId = rest[0];
+      if (!modelId && ctx.hasUI) {
+        const manual = Object.entries(overrides).flatMap(([id, override]) => override.cost ? [id] : []);
+        if (manual.length === 0) {
+          ctx.ui.notify(`No manual prices configured for gateway "${gw.name}"`, "info");
+          return;
+        }
+        modelId = (await ctx.ui.select("Remove manual model price", manual)) ?? undefined;
+      }
       if (!modelId) {
         ctx.ui.notify("Usage: /ai-gateway set-price remove <modelID>", "warning");
         return;
       }
-      const overrides = { ...(gw.overrides ?? {}) };
       const current = overrides[modelId];
       if (!current?.cost) {
         ctx.ui.notify(`No manual price configured for "${modelId}"`, "warning");
@@ -905,7 +1023,8 @@ async function overridesCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, 
   const { ui } = ctx;
   const gw = await pickGateway(ctx);
   if (!gw) return;
-  const [sub, ...rest] = args.trim().split(/\s+/);
+  const trimmed = args.trim();
+  const [sub, ...rest] = trimmed ? trimmed.split(/\s+/) : ["list"];
   const config = loadConfig();
   const current = config.gateways.find((g) => g.name === gw.name) ?? gw;
 
@@ -922,12 +1041,20 @@ async function overridesCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, 
       return;
     }
     case "remove": {
-      const modelId = rest[0];
+      const ov = { ...(current.overrides ?? {}) };
+      let modelId = rest[0];
+      if (!modelId && ctx.hasUI) {
+        const keys = Object.keys(ov);
+        if (keys.length === 0) {
+          ui.notify(`No overrides configured for gateway "${current.name}"`, "info");
+          return;
+        }
+        modelId = (await ui.select("Remove model override", keys)) ?? undefined;
+      }
       if (!modelId) {
         ui.notify("Usage: /ai-gateway overrides remove <modelID>", "warning");
         return;
       }
-      const ov = { ...(current.overrides ?? {}) };
       if (!(modelId in ov)) {
         ui.notify(`No override configured for model "${modelId}"`, "warning");
         return;
@@ -1163,10 +1290,13 @@ async function listGateways(ctx: ExtensionCommandContext): Promise<void> {
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-  pi.registerCommand("ai-gateway", {
-    description: "Manage gateways, metadata overrides, and model prices",
-    handler: (args, ctx) => gatewayCommand(pi, args, ctx),
-  });
+  const command = {
+    description: "Manage AI gateways",
+    handler: (args: string, ctx: ExtensionCommandContext) => gatewayCommand(pi, args, ctx),
+  };
+  pi.registerCommand("ai-gateway", command);
+  pi.registerCommand("ai-gateways", command);
+  pi.registerCommand("ai-getways", command);
 
   const config = loadConfig();
   if (config.gateways.length === 0) {
