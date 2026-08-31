@@ -26,9 +26,28 @@ pi install git:github.com/tlsneo/pi-ai-gateway
 pi install ./pi-ai-gateway
 ```
 
+升级包之后重启 Pi，让新的扩展代码生效。
+
+## 快速开始
+
+打开 TUI 菜单：
+
+```text
+/ai-gateway
+```
+
+然后选择操作：
+
+- `Add gateway` — 添加 OpenAI 兼容网关
+- `Fetch models/prices` — 不重启 Pi，刷新模型列表和价格
+- `Prices` — 选择价格回退预设或设置手动价格
+- `Overrides` — 调整上下文、最大输出、思考支持等模型元数据
+
+大多数情况下直接用菜单即可。下面的子命令保留给脚本或快速操作。
+
 ## 配置
 
-创建 `~/.pi/agent/ai-gateway.json`（模板见 `ai-gateway.example.json`）：
+菜单会自动写入 `~/.pi/agent/ai-gateway.json`。也可以手动创建（模板见 `ai-gateway.example.json`）：
 
 ```json
 {
@@ -65,7 +84,7 @@ pi install ./pi-ai-gateway
 
 自动识别依据是 Pi 自带的 `openai.json`，不是 `gpt-` 前缀，因此 `gpt-oss-*` 和未登记的网关别名默认仍走 Chat Completions。普通 API Key 网关使用的是 `openai-responses`，不是 `openai-codex-responses`。网关如果不支持 `/v1/responses`，可显式设置 `"api": "openai-completions"`。
 
-配置完成后重启 Pi，`/model` 里即可看到对应 provider 前缀的全部模型。
+如果手动改 JSON，重启 Pi 或运行 `/ai-gateway fetch`；之后 `/model` 里即可看到对应 provider 前缀的全部模型。
 
 > 密钥安全：配置文件在仓库外，权限自动设为 600。仓库里只有 `ai-gateway.example.json`（占位符，零密钥），请勿提交真实配置文件。
 
@@ -122,7 +141,9 @@ pi install ./pi-ai-gateway
 
 `manual` 后不带参数时会交互询问模型和四项价格。手动价格保存在现有的 `overrides.cost` 字段中。
 
-## 命令
+## 子命令
+
+默认入口是交互式 `/ai-gateway` 菜单。下面这些直达命令是可选的：
 
 ```
 /ai-gateway              打开交互式 TUI 菜单
@@ -207,8 +228,8 @@ npm test        # node --test，纯函数单测
 
 | 现象 | 处理 |
 |---|---|
-| 启动日志 `未配置网关` | 运行 `/ai-gateway add` 或创建配置文件 |
+| 启动日志 `未配置网关` | 运行 `/ai-gateway` 选择 `Add gateway`，或创建配置文件 |
 | `与 Pi 内置 provider 重名` | 换一个 `name`（如 `my-openai`） |
 | 网关注册失败但 Pi 正常启动 | 看启动日志错误；有缓存会自动降级（日志标注"缓存降级"） |
-| 模型/价格看起来还是旧的 | 运行 `/ai-gateway fetch`（或 `/ai-gateway fetch <name>`） |
+| 模型/价格看起来还是旧的 | 运行 `/ai-gateway` 选择 `Fetch models/prices`，或运行 `/ai-gateway fetch <name>` |
 | 某模型没有思考档位 | 该模型不在内置目录，属正常（默认值）；`pi update --models` 更新目录后重启 |

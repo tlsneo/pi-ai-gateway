@@ -26,9 +26,28 @@ For local development, you can also install from a path (changes take effect on 
 pi install ./pi-ai-gateway
 ```
 
+After upgrading the package, restart Pi so the new extension code is loaded.
+
+## Quick start
+
+Run the TUI menu:
+
+```text
+/ai-gateway
+```
+
+Then pick an action:
+
+- `Add gateway` — save a new OpenAI-compatible gateway
+- `Fetch models/prices` — refresh model list and prices without restarting Pi
+- `Prices` — choose a fallback preset or set manual prices
+- `Overrides` — adjust context window, max output tokens, thinking support, etc.
+
+Most users should use the menu. The subcommands below remain for scripting or quick one-off changes.
+
 ## Configuration
 
-Create `~/.pi/agent/ai-gateway.json` (template: `ai-gateway.example.json`):
+The menu writes `~/.pi/agent/ai-gateway.json` for you. You can also create it manually (template: `ai-gateway.example.json`):
 
 ```json
 {
@@ -65,7 +84,7 @@ explicit api > apiRouting: "auto" > openai-completions
 
 Automatic detection uses Pi's bundled `openai.json`, not a `gpt-` name prefix, so `gpt-oss-*` and unregistered gateway aliases stay on Chat Completions by default. Regular API-key gateways use `openai-responses`, not `openai-codex-responses`. If the gateway does not support `/v1/responses`, set `"api": "openai-completions"` explicitly.
 
-Restart Pi after configuring; all models will appear under `/model` with the configured provider prefix.
+If you edit the JSON manually, restart Pi or run `/ai-gateway fetch`; all models then appear under `/model` with the configured provider prefix.
 
 > Key security: the config file lives outside the repo and is chmod 600 automatically. Only `ai-gateway.example.json` (placeholders, zero secrets) is committed. Never commit the real config file.
 
@@ -122,7 +141,9 @@ Set a manual model price, in USD per one million tokens:
 
 With no arguments after `manual`, Pi prompts for the model and four rates. Manual prices are stored in the existing per-model `overrides.cost` field.
 
-## Commands
+## Subcommands
+
+The interactive `/ai-gateway` menu is the default UI. These direct commands are optional:
 
 ```
 /ai-gateway               Open the interactive TUI menu
@@ -207,8 +228,8 @@ npm test        # node --test, pure-function unit tests
 
 | Symptom | Fix |
 |---|---|
-| Startup log says `未配置网关` / no gateways configured | Run `/ai-gateway add` or create the config file |
+| Startup log says `未配置网关` / no gateways configured | Run `/ai-gateway`, choose `Add gateway`, or create the config file |
 | `与 Pi 内置 provider 重名` / name collides with a built-in provider | Choose another `name` (e.g. `my-openai`) |
 | Gateway failed to register but Pi started fine | Check the startup log; a cached model list is used automatically (marked "cache degraded") |
-| Models/prices look stale | Run `/ai-gateway fetch` (or `/ai-gateway fetch <name>`) |
+| Models/prices look stale | Run `/ai-gateway`, choose `Fetch models/prices`, or run `/ai-gateway fetch <name>` |
 | A model has no thinking levels | It's not in the built-in catalog — normal (defaults apply). Run `pi update --models` and restart |
