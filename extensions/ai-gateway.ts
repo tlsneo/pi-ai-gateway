@@ -31,6 +31,7 @@ import {
   buildModelsDevCatalog,
   normalizeCost,
   parseNewApiPricing,
+  parseNewApiPricingModelIds,
   parseNewApiRatioCatalog,
   resolveModelCost,
   type ModelCost,
@@ -404,6 +405,18 @@ export function applyOverrides(
 // Section 3: gateway — fetch model list + filter + cache fallback
 // ===========================================================================
 
+export function mergeModelIds(primary: string[], secondary: string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const id of [...primary, ...secondary]) {
+    const key = id.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(id);
+  }
+  return merged;
+}
+
 /** Remove non-chat noise models (image/embedding/audio/tts/rerank...). */
 export function filterModelIds(ids: string[]): string[] {
   return ids.filter((id) => !NOISE_PATTERN.test(id));
@@ -423,23 +436,31 @@ async function fetchJson(url: string, timeoutMs: number, headers?: Record<string
   return res.json();
 }
 
-async function fetchGatewayPrices(gw: GatewayConfig): Promise<PriceCatalog> {
+interface GatewayPriceInfo {
+  prices: PriceCatalog;
+  modelIds: string[];
+}
+
+async function fetchGatewayPriceInfo(gw: GatewayConfig): Promise<GatewayPriceInfo> {
   const root = gatewayRootUrl(gw.baseUrl);
   try {
     const [pricingResult, statusResult] = await Promise.allSettled([
       fetchJson(`${root}/api/pricing`, PRICING_FETCH_TIMEOUT_MS),
       fetchJson(`${root}/api/status`, PRICING_FETCH_TIMEOUT_MS),
     ]);
-    if (pricingResult.status !== "fulfilled") return new Map();
+    if (pricingResult.status !== "fulfilled") return { prices: new Map(), modelIds: [] };
     const status = statusResult.status === "fulfilled" && statusResult.value && typeof statusResult.value === "object"
       ? statusResult.value as { data?: { quota_per_unit?: unknown } }
       : undefined;
     const quotaPerUnit = typeof status?.data?.quota_per_unit === "number" && status.data.quota_per_unit > 0
       ? status.data.quota_per_unit
       : 500_000;
-    return parseNewApiPricing(pricingResult.value, quotaPerUnit);
+    return {
+      prices: parseNewApiPricing(pricingResult.value, quotaPerUnit),
+      modelIds: parseNewApiPricingModelIds(pricingResult.value),
+    };
   } catch {
-    return new Map();
+    return { prices: new Map(), modelIds: [] };
   }
 }
 
@@ -562,6 +583,7 @@ export async function registerGateway(
   cache: Record<string, string[]>,
   openAIResponsesModelIds: ReadonlySet<string> = new Set(),
 ): Promise<RegisterResult> {
+  const gatewayPriceInfoPromise = fetchGatewayPriceInfo(gw);
   let ids: string[];
   let degraded = false;
   try {
@@ -582,11 +604,10 @@ export async function registerGateway(
     }
   }
 
-  const filtered = filterModelIds(ids);
-  const [gatewayPrices, presetPrices] = await Promise.all([
-    fetchGatewayPrices(gw),
-    fetchPresetPrices(gw.pricePreset, filtered),
-  ]);
+  const gatewayPriceInfo = await gatewayPriceInfoPromise;
+  const filtered = filterModelIds(mergeModelIds(ids, gatewayPriceInfo.modelIds));
+  const presetPrices = await fetchPresetPrices(gw.pricePreset, filtered);
+  const gatewayPrices = gatewayPriceInfo.prices;
   const providerApi = (gw.api as ProviderConfig["api"]) ?? DEFAULT_API;
   const models = filtered.map((id) => {
     const override = gw.overrides?.[id];

@@ -161,6 +161,11 @@ export function parseTieredBillingExpr(expression: string): ModelCost | undefine
   return tiers.length > 0 ? { ...base.rates, tiers } : base.rates;
 }
 
+export function parseNewApiPricingModelIds(json: unknown): string[] {
+  if (!isRecord(json) || json.success === false || !Array.isArray(json.data)) return [];
+  return json.data.flatMap((item) => isRecord(item) && typeof item.model_name === "string" ? [item.model_name] : []);
+}
+
 export function parseNewApiPricing(json: unknown, quotaPerUnit = 500_000): PriceCatalog {
   const catalog: PriceCatalog = new Map();
   if (!isRecord(json) || json.success === false || !Array.isArray(json.data)) return catalog;

@@ -416,6 +416,7 @@ test("registerGateway: applies live /api/pricing and lets a manual cost override
         data: [
           { model_name: "gateway-price", quota_type: 0, model_ratio: 1, completion_ratio: 4 },
           { model_name: "manual-price", quota_type: 0, model_ratio: 2, completion_ratio: 3 },
+          { model_name: "pricing-only", quota_type: 0, model_ratio: 3, completion_ratio: 5 },
         ],
       }));
     }
@@ -438,6 +439,7 @@ test("registerGateway: applies live /api/pricing and lets a manual cost override
     }, new Map(), {});
 
     assert.equal(result.ok, true);
+    assert.equal(result.modelCount, 3);
     assert.deepEqual(registeredModels.find((model) => model.id === "gateway-price")?.cost, {
       input: 2,
       output: 8,
@@ -449,6 +451,12 @@ test("registerGateway: applies live /api/pricing and lets a manual cost override
       output: 10,
       cacheRead: 1,
       cacheWrite: 2,
+    });
+    assert.deepEqual(registeredModels.find((model) => model.id === "pricing-only")?.cost, {
+      input: 6,
+      output: 30,
+      cacheRead: 0,
+      cacheWrite: 0,
     });
   } finally {
     globalThis.fetch = previousFetch;

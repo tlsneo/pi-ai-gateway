@@ -7,7 +7,7 @@
 - **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`；也可随时 `/ai-gateway fetch` 刷新模型和价格，无需重启
 - **自动协议路由**：新建网关默认让 Pi 官方 OpenAI 模型走 `/v1/responses`，其他模型走 `/v1/chat/completions`
 - **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
-- **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格
+- **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格，也会补上只出现在价格表里的模型
 - **可选价格预设**：网关缺少某模型价格时，可按网关显式选择 Models.dev 或 BaseLLM；手动价格始终最高优先级
 - **零噪音**：自动剔除 image / embedding / tts 等不可聊天的模型
 - **弹性**：单网关失败不影响 Pi 启动，断网时用上次缓存降级
@@ -167,7 +167,7 @@ pi install ./pi-ai-gateway
 ```
 启动时，或运行 /ai-gateway fetch 时，对每个网关：
   1. GET {baseUrl}/v1/models            → 模型名单
-  2. GET {网关根地址}/api/pricing       → 网关价格（尽力获取）
+  2. GET {网关根地址}/api/pricing       → 网关价格 + /v1/models 缺失的模型（尽力获取）
   3. 索引 Pi 内置目录 providers/data/*.json → 能力档案库
   4. 从 Pi 官方 openai.json 建立 Responses 模型集合
   5. 每个模型 id 借能力元数据：

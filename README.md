@@ -7,7 +7,7 @@ Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ..
 - **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup; run `/ai-gateway fetch` anytime to refresh models/prices without restart
 - **Automatic protocol routing**: newly added gateways send canonical OpenAI models to `/v1/responses` and other models to `/v1/chat/completions`
 - **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
-- **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers
+- **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers and pricing-only model IDs
 - **Optional price presets**: when a gateway does not publish a model price, opt into Models.dev or BaseLLM defaults per gateway; manual prices always win
 - **Zero noise**: automatically filters out non-chat models (image / embedding / tts / rerank)
 - **Resilient**: a failing gateway never breaks Pi startup; falls back to a cached model list when offline
@@ -167,7 +167,7 @@ Or pass arguments directly to skip the prompts:
 ```
 At startup, or when you run /ai-gateway fetch, for each gateway:
   1. GET {baseUrl}/v1/models                  → model list
-  2. GET {gatewayRoot}/api/pricing            → gateway prices (best effort)
+  2. GET {gatewayRoot}/api/pricing            → gateway prices + any models missing from /v1/models (best effort)
   3. Index Pi's built-in catalog providers/data/*.json → capability knowledge base
   4. Build a Responses-model set from Pi's canonical openai.json
   5. For each model id, borrow capabilities:
