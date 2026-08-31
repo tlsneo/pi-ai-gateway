@@ -126,8 +126,6 @@ With no arguments after `manual`, Pi prompts for the model and four rates. Manua
 
 ```
 /ai-gateway               Open the interactive TUI menu
-/ai-gateways              Alias for /ai-gateway
-/ai-getways               Typo-friendly alias
 /ai-gateway add           Interactive wizard (name → baseUrl → apiKey)
 /ai-gateway list          List configured gateways
 /ai-gateway fetch [name]  Refetch model list + prices for all gateways, or one gateway

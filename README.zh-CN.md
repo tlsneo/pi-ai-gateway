@@ -126,8 +126,6 @@ pi install ./pi-ai-gateway
 
 ```
 /ai-gateway              打开交互式 TUI 菜单
-/ai-gateways             /ai-gateway 的别名
-/ai-getways              防手滑别名
 /ai-gateway add          交互向导添加网关（name → baseUrl → apiKey）
 /ai-gateway list         列出已配置网关
 /ai-gateway fetch [name]  重新拉取全部网关或单个网关的模型列表和价格

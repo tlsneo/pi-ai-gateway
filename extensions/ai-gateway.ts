@@ -805,8 +805,7 @@ function showGatewayHelp(ctx: ExtensionCommandContext): void {
       "  /ai-gateway test <name>     Test gateway\n" +
       "  /ai-gateway remove <name>   Remove gateway\n" +
       "  /ai-gateway overrides       Model metadata overrides\n" +
-      "  /ai-gateway set-price       Prices and presets\n" +
-      "Aliases: /ai-gateways, /ai-getways",
+      "  /ai-gateway set-price       Prices and presets",
     "info",
   );
 }
@@ -1295,8 +1294,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     handler: (args: string, ctx: ExtensionCommandContext) => gatewayCommand(pi, args, ctx),
   };
   pi.registerCommand("ai-gateway", command);
-  pi.registerCommand("ai-gateways", command);
-  pi.registerCommand("ai-getways", command);
 
   const config = loadConfig();
   if (config.gateways.length === 0) {

@@ -38,8 +38,8 @@ import {
 // command menu
 // ---------------------------------------------------------------------------
 
-test("extension: registers gateway menu aliases", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-alias-"));
+test("extension: registers gateway command", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-command-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousWarn = console.warn;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -53,7 +53,7 @@ test("extension: registers gateway menu aliases", async () => {
       },
     } as unknown as Parameters<typeof aiGatewayExtension>[0]);
 
-    assert.deepEqual(commands, ["ai-gateway", "ai-gateways", "ai-getways"]);
+    assert.deepEqual(commands, ["ai-gateway"]);
   } finally {
     console.warn = previousWarn;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
