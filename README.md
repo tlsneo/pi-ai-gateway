@@ -152,7 +152,9 @@ The interactive `/ai-gateway` menu is the default UI. These direct commands are 
 /ai-gateway fetch [name]  Refetch model list + prices for all gateways, or one gateway
 /ai-gateway remove <name> Remove a gateway
 /ai-gateway test <name>   Test connectivity + report model count
-/ai-gateway overrides     Show current per-model overrides
+/ai-gateway overrides     Open the overrides menu (list overrides in non-interactive mode)
+/ai-gateway overrides list
+                          Show current per-model overrides
 /ai-gateway overrides add [modelID] [contextWindow] [maxTokens]
                           Interactively set an override (current catalog value shown as default)
 /ai-gateway overrides remove <modelID>
@@ -175,10 +177,13 @@ The interactive `/ai-gateway` menu is the default UI. These direct commands are 
   → context window? press Enter to keep the current catalog value, or enter 272000
   → max output tokens? press Enter to keep
   → thinking support? keep / true / false
+  → when thinking is enabled: keep / disable xhigh and max / xhigh only / max only / both
   → saved and re-registered automatically — takes effect immediately
 ```
 
-Or pass arguments directly to skip the prompts:
+You can also enter via `/ai-gateway overrides` → `Add override`. Extended-level choices are saved as `thinkingLevelMap`, preserving lower-level restrictions and existing API mappings; Esc at this step cancels without saving. Only enable levels your gateway/model actually supports: the plugin does not probe backend capabilities. After saving, use Pi's `/thinking` picker or Shift+Tab to select the session's thinking level.
+
+Or pass arguments directly to skip the corresponding numeric prompts:
 
 ```
 /ai-gateway overrides add gpt-5.6-sol 272000
@@ -232,4 +237,4 @@ npm test        # node --test, pure-function unit tests
 | `与 Pi 内置 provider 重名` / name collides with a built-in provider | Choose another `name` (e.g. `my-openai`) |
 | Gateway failed to register but Pi started fine | Check the startup log; a cached model list is used automatically (marked "cache degraded") |
 | Models/prices look stale | Run `/ai-gateway`, choose `Fetch models/prices`, or run `/ai-gateway fetch <name>` |
-| A model has no thinking levels | It's not in the built-in catalog — normal (defaults apply). Run `pi update --models` and restart |
+| A model has no thinking levels or is missing xhigh/max | `/ai-gateway overrides` → `Add override`, enable thinking and the extended levels supported by your backend, then select a level with `/thinking` |

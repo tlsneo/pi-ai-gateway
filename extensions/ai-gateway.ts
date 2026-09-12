@@ -659,7 +659,9 @@ export async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: Extens
     case "test":
       return testGatewayCommand(ctx, rest[0]);
     case "overrides":
-      return overridesCommand(pi, ctx, rest.join(" "));
+      return rest.length === 0 && ctx.hasUI
+        ? openOverridesMenu(pi, ctx)
+        : overridesCommand(pi, ctx, rest.join(" "));
     case "set-price":
       return setPriceCommand(pi, ctx, rest);
     case "help":
@@ -1160,14 +1162,31 @@ async function overridesAdd(
       `true (current ${curReasoning})`,
       `false (current ${curReasoning})`,
     ]);
-    if (choice?.startsWith("true")) reasoning = true;
-    else if (choice?.startsWith("false")) reasoning = false;
+    if (choice === undefined) return;
+    if (choice.startsWith("true")) reasoning = true;
+    else if (choice.startsWith("false")) reasoning = false;
   }
 
   const ov: Partial<ModelMeta> = {};
   if (contextWindow !== undefined) ov.contextWindow = contextWindow;
   if (maxTokens !== undefined) ov.maxTokens = maxTokens;
   if (reasoning !== undefined) ov.reasoning = reasoning;
+  if (ctx.hasUI && (reasoning ?? curReasoning)) {
+    const choice = await ui.select(
+      `Extended thinking levels (current xhigh: ${base.thinkingLevelMap?.xhigh ?? "unsupported"}, max: ${base.thinkingLevelMap?.max ?? "unsupported"})\nOnly enable levels supported by your gateway/model. Lower-level mappings are preserved.`,
+      ["Keep", "Disable xhigh / max", "Enable xhigh only", "Enable max only", "Enable xhigh + max"],
+    );
+    if (choice === undefined) return;
+    if (choice !== "Keep") {
+      ov.thinkingLevelMap = {
+        ...base.thinkingLevelMap,
+        xhigh: choice === "Enable xhigh only" || choice === "Enable xhigh + max"
+          ? base.thinkingLevelMap?.xhigh ?? "xhigh" : null,
+        max: choice === "Enable max only" || choice === "Enable xhigh + max"
+          ? base.thinkingLevelMap?.max ?? "max" : null,
+      };
+    }
+  }
   currentOv[modelId] = { ...existingOverride, ...ov };
   const cleaned = stripRedundant(currentOv, catalog);
 

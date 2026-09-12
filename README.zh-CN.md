@@ -152,7 +152,9 @@ pi install ./pi-ai-gateway
 /ai-gateway fetch [name]  重新拉取全部网关或单个网关的模型列表和价格
 /ai-gateway remove <name> 移除网关
 /ai-gateway test <name>   测试连通性 + 报告模型数
-/ai-gateway overrides     查看当前网关的模型覆盖
+/ai-gateway overrides     打开模型覆盖菜单（非交互模式下列出覆盖）
+/ai-gateway overrides list
+                          查看当前网关的模型覆盖
 /ai-gateway overrides add [模型ID] [contextWindow] [maxTokens]
                           交互设置单模型覆盖（自动带出当前档案值作默认）
 /ai-gateway overrides remove <模型ID>
@@ -175,10 +177,13 @@ pi install ./pi-ai-gateway
   → 上下文窗口？回车保留当前档案值，输入 272000 则改为 27.2 万
   → 最大输出？回车保留
   → 思考支持？保留 / true / false
+  → 开启思考时，扩展档位？保留 / 禁用 xhigh、max / 仅 xhigh / 仅 max / 两者都启用
   → 保存并自动重新注册，立即生效
 ```
 
-也可以一次性给参数（跳过提问）：
+也可从 `/ai-gateway overrides` → `Add override` 进入。扩展档位选择会写入 `thinkingLevelMap`，保留原有低档位限制和已有的 API 映射值；Esc 取消该步骤时不保存。只启用网关和模型确实支持的档位，插件不会检测后端能力。保存后在 Pi 的 `/thinking` 中选择本次会话的强度，或用 Shift+Tab 切换。
+
+也可以一次性给参数（跳过对应的数值提问）：
 
 ```
 /ai-gateway overrides add gpt-5.6-sol 272000
@@ -232,4 +237,4 @@ npm test        # node --test，纯函数单测
 | `与 Pi 内置 provider 重名` | 换一个 `name`（如 `my-openai`） |
 | 网关注册失败但 Pi 正常启动 | 看启动日志错误；有缓存会自动降级（日志标注"缓存降级"） |
 | 模型/价格看起来还是旧的 | 运行 `/ai-gateway` 选择 `Fetch models/prices`，或运行 `/ai-gateway fetch <name>` |
-| 某模型没有思考档位 | 该模型不在内置目录，属正常（默认值）；`pi update --models` 更新目录后重启 |
+| 某模型没有思考档位或缺少 xhigh/max | `/ai-gateway overrides` → `Add override`，开启思考并选择后端支持的扩展档位；保存后用 `/thinking` 切换 |

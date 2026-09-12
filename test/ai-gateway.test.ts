@@ -23,6 +23,7 @@ import aiGatewayExtension, {
   saveConfig,
   toPositiveInt,
   validateGateway,
+  type ModelMeta,
 } from "../extensions/ai-gateway.ts";
 import {
   ZERO_COST,
@@ -83,6 +84,94 @@ test("gatewayCommand: blank args opens an interactive menu", async () => {
 
     assert.deepEqual(menus[0], ["Add gateway", "List gateways", "Help"]);
   } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("overrides TUI: saves extended levels, preserves metadata, and re-registers", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-gateway-thinking-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousFetch = globalThis.fetch;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  globalThis.fetch = async (input) => String(input).endsWith("/v1/models")
+    ? new Response(JSON.stringify({ data: [{ id: "test-thinking" }] }))
+    : new Response("not found", { status: 404 });
+
+  try {
+    for (const scenario of [
+      { choice: "Enable xhigh only", xhigh: "xhigh", max: null },
+      { choice: "Enable max only", xhigh: null, max: "max" },
+      { choice: "Enable xhigh + max", xhigh: "xhigh", max: "max" },
+      { choice: "Disable xhigh / max", xhigh: null, max: null },
+      { choice: "Keep", xhigh: null, max: null },
+      { choice: "Keep", xhigh: "provider-xhigh", max: null, existing: true },
+      { choice: "Enable xhigh + max", xhigh: "provider-xhigh", max: "max", existing: true },
+      { choice: undefined, cancelled: true },
+      { choice: "Keep", disable: true },
+    ]) {
+      const initial: Partial<ModelMeta> = {
+        reasoning: scenario.existing ?? false,
+        contextWindow: 250000,
+        cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: {
+          off: "none", minimal: null, low: null, high: "provider-high",
+          xhigh: scenario.existing ? "provider-xhigh" : null, max: null,
+        },
+      };
+      saveConfig({ gateways: [{
+        name: "gw", baseUrl: "https://gateway.example/v1", apiKey: "sk-test",
+        overrides: { "test-thinking": initial, untouched: { maxTokens: 42 } },
+      }] });
+      const before = fs.readFileSync(configPath(), "utf8");
+      let registered: ModelMeta | undefined;
+      let levelsPrompted = false;
+      const pi = {
+        registerProvider(_name: string, config: { models: ModelMeta[] }) {
+          registered = config.models[0];
+        },
+      } as unknown as Parameters<typeof gatewayCommand>[0];
+      const ctx = {
+        hasUI: true,
+        ui: {
+          async select(title: string, choices: string[]) {
+            if (title === "AI Gateway overrides") return "Add override";
+            if (title === "Thinking support") return choices[scenario.existing ? 0 : scenario.disable ? 2 : 1];
+            assert.match(title, /^Extended thinking levels/);
+            assert.ok(choices.includes("Enable max only"));
+            levelsPrompted = true;
+            return scenario.choice;
+          },
+          async input(title: string) {
+            return title.startsWith("Model ID") ? "test-thinking" : "";
+          },
+          notify() {},
+          setStatus() {},
+        },
+      } as unknown as Parameters<typeof gatewayCommand>[2];
+
+      await gatewayCommand(pi, "overrides", ctx);
+      assert.equal(levelsPrompted, !scenario.disable);
+      if (scenario.cancelled || (scenario.existing && scenario.choice === "Keep")) {
+        assert.equal(fs.readFileSync(configPath(), "utf8"), before);
+        assert.equal(registered, undefined);
+        continue;
+      }
+      const overrides = loadConfig().gateways[0].overrides!;
+      assert.deepEqual(overrides.untouched, { maxTokens: 42 });
+      const saved = overrides["test-thinking"];
+      assert.equal(registered?.reasoning, !scenario.disable);
+      assert.equal(saved.contextWindow, initial.contextWindow);
+      assert.deepEqual(saved.cost, initial.cost);
+      const expectedMap = scenario.disable ? initial.thinkingLevelMap : {
+        ...initial.thinkingLevelMap, xhigh: scenario.xhigh, max: scenario.max,
+      };
+      assert.deepEqual(saved.thinkingLevelMap, expectedMap);
+      assert.deepEqual(registered?.thinkingLevelMap, expectedMap);
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     fs.rmSync(dir, { recursive: true, force: true });
