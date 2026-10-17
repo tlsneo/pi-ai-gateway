@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
+import aiGatewayExtension, {
   configPath,
   gatewayCommand,
   loadConfig,
@@ -11,6 +11,7 @@ import {
   registerGateway,
   saveCache,
   saveConfig,
+  updateSpeedStatus,
   validateGateway,
   type GatewayConfig,
 } from "../extensions/ai-gateway.ts";
@@ -40,19 +41,33 @@ function fixture(t: TestContext, gateways: GatewayConfig[] = [gateway]) {
   const notices: string[] = [];
   const prompts: Array<{ title: string; choices?: string[] }> = [];
   const answers: Array<string | undefined> = [];
+  const statuses = new Map<string, string>();
+  const handlers = new Map<string, (event: unknown, ctx: Parameters<typeof gatewayCommand>[2]) => void>();
   const pi = {
-    registerProvider(name: string, config: ProviderConfig) { registrations.push({ name, config }); },
-  } as Parameters<typeof gatewayCommand>[0];
+    registerCommand() {},
+    on(name: string, handler: (event: unknown, ctx: Parameters<typeof gatewayCommand>[2]) => void) {
+      handlers.set(name, handler);
+    },
+    registerProvider(name: string, config: ProviderConfig) {
+      registrations.push({ name, config });
+      if (ctx.model?.provider !== name) return;
+      const model = config.models?.find((m) => m.id === ctx.model?.id);
+      if (model) ctx.model = { ...model, provider: name, api: model.api ?? config.api } as typeof ctx.model;
+    },
+  } as unknown as Parameters<typeof gatewayCommand>[0];
   const ctx = {
     hasUI: true,
     ui: {
       async input(title: string) { prompts.push({ title }); return answers.shift(); },
       async select(title: string, choices: string[]) { prompts.push({ title, choices }); return answers.shift(); },
       notify(message: string) { notices.push(message); },
-      setStatus() {},
+      setStatus(key: string, value: string | undefined) {
+        if (value === undefined) statuses.delete(key);
+        else statuses.set(key, value);
+      },
     },
   } as unknown as Parameters<typeof gatewayCommand>[2];
-  return { pi, ctx, answers, notices, prompts, registrations, dir };
+  return { pi, ctx, answers, notices, prompts, registrations, statuses, handlers, dir };
 }
 
 test("speed config: validates shape, modes, ids, and GPT scope", () => {
@@ -265,6 +280,87 @@ test("Speed save failure: reports the error without changing config or registeri
   assert.equal(fs.readFileSync(configPath(), "utf8"), before);
   assert.equal(f.registrations.length, 0);
   assert.match(f.notices.at(-1)!, /not saved.*disk full/);
+});
+
+test("Speed status: uses the current registered model, not saved or other-provider settings", (t) => {
+  const f = fixture(t, [{ ...gateway, speed: { "gpt-5.5": "ultrafast" } }]);
+  f.statuses.set("other-extension", "kept");
+  for (const [provider, tier, expected] of [
+    ["gw", "priority", "⚡ Fast"], ["gw", "ultrafast", "⚡⚡ Ultrafast"],
+    ["gw", undefined, undefined], ["gw", "default", undefined],
+    ["other-gateway", "priority", undefined], ["openai", "ultrafast", undefined],
+  ] as const) {
+    f.ctx.model = { provider, id: "gpt-5.5", samplingParams: { service_tier: tier } } as unknown as typeof f.ctx.model;
+    updateSpeedStatus(f.ctx);
+    assert.equal(f.statuses.get("ai-gateway-speed"), expected);
+    assert.equal(f.statuses.get("other-extension"), "kept");
+  }
+  f.ctx.model = undefined;
+  updateSpeedStatus(f.ctx);
+  assert.equal(f.statuses.has("ai-gateway-speed"), false);
+});
+
+test("Speed status: restores on session start/reload and clears on model switches", async (t) => {
+  const f = fixture(t, [{ ...gateway, speed: { "gpt-5.5": "fast" } }]);
+  await aiGatewayExtension(f.pi);
+  const model = f.registrations.at(-1)!.config.models!.find((m) => m.id === "gpt-5.5")!;
+  f.ctx.model = { ...model, provider: "gw" } as typeof f.ctx.model;
+  for (const reason of ["startup", "reload", "resume"]) {
+    f.statuses.clear();
+    f.handlers.get("session_start")!({ reason }, f.ctx);
+    assert.equal(f.statuses.get("ai-gateway-speed"), "⚡ Fast");
+  }
+  f.ctx.model = { id: "gpt-5.5", provider: "other" } as typeof f.ctx.model;
+  f.handlers.get("model_select")!({}, f.ctx);
+  assert.equal(f.statuses.has("ai-gateway-speed"), false);
+});
+
+test("Speed status: save, Off, removal and gateway removal update immediately without reselecting", async (t) => {
+  const f = fixture(t);
+  f.ctx.model = { provider: "gw", id: "gpt-5.5" } as typeof f.ctx.model;
+  for (const [command, expected] of [
+    ["speed add gpt-5.5 fast", "⚡ Fast"], ["speed add gpt-5.5 ultrafast", "⚡⚡ Ultrafast"],
+    ["speed add gpt-5.5 off", undefined], ["speed add gpt-5.5 fast", "⚡ Fast"],
+    ["speed remove gpt-5.5", undefined], ["speed add gpt-5.5 ultrafast", "⚡⚡ Ultrafast"],
+    ["remove gw", undefined],
+  ] as const) {
+    await gatewayCommand(f.pi, command, f.ctx);
+    assert.equal(f.statuses.get("ai-gateway-speed"), expected, command);
+  }
+});
+
+test("Speed status: editing a different model or gateway does not display its tier", async (t) => {
+  const f = fixture(t, [gateway, { ...gateway, name: "other" }]);
+  f.ctx.model = { provider: "gw", id: "gpt-5.5" } as typeof f.ctx.model;
+  f.answers.push("other");
+  await gatewayCommand(f.pi, "speed add gpt-5.5 fast", f.ctx);
+  assert.equal(f.statuses.has("ai-gateway-speed"), false);
+  f.answers.push("gw");
+  await gatewayCommand(f.pi, "speed add gpt-other ultrafast", f.ctx);
+  assert.equal(f.statuses.has("ai-gateway-speed"), false);
+});
+
+test("Speed status: failed application preserves the tier of the still-active model", async (t) => {
+  const f = fixture(t);
+  f.ctx.model = { provider: "gw", id: "gpt-5.5", samplingParams: { service_tier: "priority" } } as unknown as typeof f.ctx.model;
+  updateSpeedStatus(f.ctx);
+  t.mock.method(f.pi, "registerProvider", () => { throw new Error("registration failed"); });
+  await gatewayCommand(f.pi, "speed add gpt-5.5 ultrafast", f.ctx);
+  assert.equal(f.statuses.get("ai-gateway-speed"), "⚡ Fast");
+  f.ctx.model = { provider: "gw", id: "gpt-5.5" } as typeof f.ctx.model;
+  await gatewayCommand(f.pi, "speed add gpt-5.5 fast", f.ctx);
+  assert.equal(f.statuses.has("ai-gateway-speed"), false);
+});
+
+test("Speed status: refresh reflects manual config edits and incompatible API cleanup", async (t) => {
+  const f = fixture(t, [{ ...gateway, speed: { "gpt-5.5": "ultrafast" } }]);
+  f.ctx.model = { provider: "gw", id: "gpt-5.5" } as typeof f.ctx.model;
+  await refreshGateways(f.pi, f.ctx);
+  assert.equal(f.statuses.get("ai-gateway-speed"), "⚡⚡ Ultrafast");
+  saveConfig({ gateways: [{ ...gateway, api: "openai-completions", speed: { "gpt-5.5": "ultrafast" } }] });
+  t.mock.method(console, "warn", () => {});
+  await refreshGateways(f.pi, f.ctx);
+  assert.equal(f.statuses.has("ai-gateway-speed"), false);
 });
 
 test("Speed non-UI: no hidden selectors, and multiple gateways require interactive selection", async (t) => {

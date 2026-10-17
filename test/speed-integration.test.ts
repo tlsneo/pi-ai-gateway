@@ -91,13 +91,20 @@ test("Speed integration: real Pi session sends tiers and clears them on the next
   });
   t.after(() => session.dispose());
   const notices: string[] = [];
+  const statuses = new Map<string, string>();
   await session.bindExtensions({ mode: "print", uiContext: {
-    notify(message: string) { notices.push(message); }, setStatus() {},
+    notify(message: string) { notices.push(message); },
+    setStatus(key: string, value: string | undefined) {
+      if (value === undefined) statuses.delete(key);
+      else statuses.set(key, value);
+    },
   } });
   await session.setModel(runtime.getModel("gw", "gpt-5.5"));
   session.setThinkingLevel("high");
+  assert.equal(statuses.has("ai-gateway-speed"), false);
   for (const mode of ["ultrafast", "fast", "off", "ultrafast", "remove"] as const) {
     await session.prompt(mode === "remove" ? "/ai-gateway speed remove gpt-5.5" : `/ai-gateway speed add gpt-5.5 ${mode}`);
+    assert.equal(statuses.get("ai-gateway-speed"), mode === "fast" ? "⚡ Fast" : mode === "ultrafast" ? "⚡⚡ Ultrafast" : undefined);
     const before = requests.length;
     await session.prompt("Reply OK");
     assert.equal(requests.length, before + 1, notices.join("\n"));
@@ -119,6 +126,12 @@ test("Speed integration: real Pi session sends tiers and clears them on the next
   await session.prompt("Reply OK");
   assert.equal(requests.at(-1)!.body.service_tier, undefined);
   assert.equal(requests.at(-1)!.headers["openai-service-tier"], undefined);
+  await session.prompt("/ai-gateway speed add gpt-5.5 fast");
+  assert.equal(statuses.has("ai-gateway-speed"), false);
+  await session.setModel(runtime.getModel("gw", "gpt-5.5"));
+  assert.equal(statuses.get("ai-gateway-speed"), "⚡ Fast");
+  await session.setModel(runtime.getModel("gw", "gpt-other"));
+  assert.equal(statuses.has("ai-gateway-speed"), false);
 
   // Fast also reaches Chat Completions without changing the selected gateway protocol.
   const config = loadConfig();
@@ -129,6 +142,7 @@ test("Speed integration: real Pi session sends tiers and clears them on the next
   assert.equal(requests.at(-1)!.url, "/v1/chat/completions");
   assert.equal(requests.at(-1)!.body.service_tier, "priority");
   assert.equal(requests.at(-1)!.headers["openai-service-tier"], undefined);
+  assert.equal(statuses.get("ai-gateway-speed"), "⚡ Fast");
   assert.equal(requestsFromHooks, requests.length);
   assert.equal(responsesFromHooks, requests.length);
   assert.ok(streamEvents >= requests.length);

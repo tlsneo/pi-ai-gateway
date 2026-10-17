@@ -126,6 +126,8 @@ pi install ./pi-ai-gateway
 
 Fast 和 Ultrafast 接受 `gpt-` 聊天模型 ID，排除 `gpt-oss` 及 image 等非聊天模型，不硬编码型号白名单。Fast 仅支持 `openai-completions` / `openai-responses`；Ultrafast 必须使用 `openai-responses`。Speed 不改变现有路由，也不检测后端能力。
 
+当前模型已注册的请求档位会在 footer 显示为 `⚡ Fast` 或 `⚡⚡ Ultrafast`；Off / 无档位时隐藏。保存、删除、切换模型、启动或重载会同步更新。更新后的 [pi-cometix-footer](https://github.com/tlsneo/pi-cometix-footer) 会把它放在思考强度旁；Pi 默认 footer 则显示为普通扩展状态。更新两个包后运行 `/reload` 即可启用该位置。状态键为 `ai-gateway-speed`，依据已注册的请求参数显示，不会把仅保存但应用失败的设置误报成已应用。
+
 **这些是请求档位，不代表已确认加速。** 网关可能丢弃或拒绝参数，也可能额外收费。价格解析逻辑不变：Pi 显示的是估算，不提供按 tier 精确计费。其他扩展或 `models.json` 中更高优先级的配置可以覆盖这些原生参数；Off 不保证关闭外部设置。
 
 ### 价格优先级与预设

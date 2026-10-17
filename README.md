@@ -126,6 +126,8 @@ Each gateway accepts `speed?: Record<modelId, "off" | "fast" | "ultrafast">`, ke
 
 Fast and Ultrafast accept `gpt-` chat model IDs, excluding `gpt-oss` and non-chat models such as image models, without a hard-coded model allowlist. Fast supports only `openai-completions` / `openai-responses`; Ultrafast requires `openai-responses`. Speed does not change existing routing or probe backend capabilities.
 
+The current model's registered tier appears as `⚡ Fast` or `⚡⚡ Ultrafast` in the footer; Off / no tier is hidden. It updates on save, removal, model switches, and session start/reload. With an updated [pi-cometix-footer](https://github.com/tlsneo/pi-cometix-footer), it sits beside the thinking level; Pi's default footer shows it as an extension status. Update both packages and run `/reload` to enable this placement. The status key is `ai-gateway-speed`; it reflects registered request parameters, not just a saved setting that may have failed to apply.
+
 **These are requested tiers, not confirmed acceleration.** Gateways may discard or reject the parameters, or charge extra. Price resolution is unchanged: Pi displays estimates, not tier-accurate billing. Higher-priority configuration from other extensions or `models.json` can override the native parameters; Off does not guarantee that external settings are disabled.
 
 ### Price resolution and presets

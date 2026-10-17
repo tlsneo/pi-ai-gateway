@@ -46,15 +46,18 @@ test("extension: registers gateway command", async () => {
   process.env.PI_CODING_AGENT_DIR = dir;
   console.warn = () => {};
   const commands: string[] = [];
+  const events: string[] = [];
 
   try {
     await aiGatewayExtension({
       registerCommand(name: string) {
         commands.push(name);
       },
+      on(name: string) { events.push(name); },
     } as unknown as Parameters<typeof aiGatewayExtension>[0]);
 
     assert.deepEqual(commands, ["ai-gateway"]);
+    assert.deepEqual(events, ["session_start", "model_select"]);
   } finally {
     console.warn = previousWarn;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

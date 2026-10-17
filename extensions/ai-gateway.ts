@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
+  ExtensionContext,
   ProviderConfig,
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
@@ -579,6 +580,14 @@ function modelSpeedError(id: string, api: string | undefined, speed: ModelSpeed)
   return null;
 }
 
+export function updateSpeedStatus(ctx: ExtensionContext): void {
+  const model = ctx.model;
+  const isGateway = model && loadConfig().gateways.some((gw) => gw.name === model.provider);
+  // Read the registered request parameters, not a saved setting that may have failed to apply.
+  const tier = isGateway ? model.samplingParams?.service_tier : undefined;
+  ctx.ui.setStatus("ai-gateway-speed", tier === "priority" ? "⚡ Fast" : tier === "ultrafast" ? "⚡⚡ Ultrafast" : undefined);
+}
+
 function toProviderModel(
   id: string,
   meta: ModelMeta,
@@ -826,6 +835,7 @@ async function removeGatewayCommand(ctx: ExtensionCommandContext, name?: string)
 
   const config = loadConfig();
   saveConfig({ gateways: config.gateways.filter((g) => g.name !== gw.name) });
+  updateSpeedStatus(ctx);
   ctx.ui.notify(`Removed gateway "${gw.name}". Restart Pi for it to fully take effect`, "info");
 }
 
@@ -1033,6 +1043,7 @@ export async function refreshGateways(
     return summary;
   } finally {
     ctx.ui.setStatus("ai-gateway", undefined);
+    updateSpeedStatus(ctx);
   }
 }
 
@@ -1254,6 +1265,7 @@ async function reregister(pi: ExtensionAPI, gw: GatewayConfig, ctx: ExtensionCom
     return false;
   } finally {
     ctx.ui.setStatus("ai-gateway", undefined);
+    updateSpeedStatus(ctx);
   }
 }
 
@@ -1451,6 +1463,7 @@ async function addGateway(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
     }
   } finally {
     ui.setStatus("ai-gateway", undefined);
+    updateSpeedStatus(ctx);
   }
 }
 
@@ -1476,6 +1489,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     handler: (args: string, ctx: ExtensionCommandContext) => gatewayCommand(pi, args, ctx),
   };
   pi.registerCommand("ai-gateway", command);
+  pi.on("session_start", (_event, ctx) => updateSpeedStatus(ctx));
+  pi.on("model_select", (_event, ctx) => updateSpeedStatus(ctx));
 
   const config = loadConfig();
   if (config.gateways.length === 0) {
