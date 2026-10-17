@@ -10,6 +10,7 @@
 - **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
 - **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格，也会补上只出现在价格表里的模型
 - **可选价格预设**：网关缺少某模型价格时，可按网关显式选择 Models.dev 或 BaseLLM；手动价格始终最高优先级
+- **按模型请求 Speed**：独立菜单设置 Off / Fast / Ultrafast，默认关闭；只请求服务档位，不确认后端加速
 - **零噪音**：自动剔除 image / embedding / tts 等不可聊天的模型
 - **弹性**：单网关失败不影响 Pi 启动，断网时用上次缓存降级
 - **零依赖**：纯扩展，无第三方 npm 依赖
@@ -42,6 +43,7 @@ pi install ./pi-ai-gateway
 - `Fetch models/prices` — 不重启 Pi，刷新模型列表和价格
 - `Prices` — 选择价格回退预设或设置手动价格
 - `Overrides` — 调整上下文、最大输出、思考支持等模型元数据
+- `Speed` — 按模型请求 Off / Fast / Ultrafast，与 Overrides 独立
 
 大多数情况下直接用菜单即可。下面的子命令保留给脚本或快速操作。
 
@@ -75,6 +77,7 @@ pi install ./pi-ai-gateway
 | `headers` | ❌ | 附加请求头 |
 | `pricePreset` | ❌ | 缺失价格回退：`"models-dev"` 或 `"basellm"`；省略时只采用网关价格 |
 | `overrides` | ❌ | 按模型覆盖元数据及手动价格（见下） |
+| `speed` | ❌ | 按模型请求 `"off"`、`"fast"` 或 `"ultrafast"`，与 `overrides` 分开存储（见下） |
 
 协议选择优先级：
 
@@ -110,6 +113,20 @@ pi install ./pi-ai-gateway
 ```
 
 支持覆盖的字段：`contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`。手动 `cost` 覆盖拥有最高优先级。只覆盖列出的模型，其余模型照常自动。设置 `contextWindow` 后 Pi 会在接近上限时自动压缩，请求不会超限。
+
+### speed：按模型请求服务档位（可选）
+
+每个网关支持 `speed?: Record<modelId, "off" | "fast" | "ultrafast">`，以精确模型 ID 为键，与 `overrides` 分开存储。默认关闭；`ai-gateway.example.json` 包含一个显式启用的占位示例。
+
+| 档位 | 模型注册时的效果 |
+|---|---|
+| `off` | 保留显式记录，但不附加速度请求参数 |
+| `fast` | 设置 `samplingParams.service_tier` 为 `"priority"` |
+| `ultrafast` | 设置 `samplingParams.service_tier` 为 `"ultrafast"`，并附加模型请求头 `OpenAI-Service-Tier: ultrafast` |
+
+Fast 和 Ultrafast 接受 `gpt-` 聊天模型 ID，排除 `gpt-oss` 及 image 等非聊天模型，不硬编码型号白名单。Fast 仅支持 `openai-completions` / `openai-responses`；Ultrafast 必须使用 `openai-responses`。Speed 不改变现有路由，也不检测后端能力。
+
+**这些是请求档位，不代表已确认加速。** 网关可能丢弃或拒绝参数，也可能额外收费。价格解析逻辑不变：Pi 显示的是估算，不提供按 tier 精确计费。其他扩展或 `models.json` 中更高优先级的配置可以覆盖这些原生参数；Off 不保证关闭外部设置。
 
 ### 价格优先级与预设
 
@@ -159,6 +176,12 @@ pi install ./pi-ai-gateway
                           交互设置单模型覆盖（自动带出当前档案值作默认）
 /ai-gateway overrides remove <模型ID>
                           移除某个模型的覆盖
+/ai-gateway speed         打开 Speed 菜单（非 UI 模式下列出已保存设置）
+/ai-gateway speed list    列出已保存的速度请求，不代表后端已确认档位
+/ai-gateway speed add [模型ID] [off|fast|ultrafast]
+                          添加或更新单模型速度请求
+/ai-gateway speed remove [模型ID]
+                          删除已保存的速度条目
 /ai-gateway set-price show
                           查看该网关的价格回退预设和手动价格
 /ai-gateway set-price preset <none|models-dev|basellm>
@@ -167,6 +190,7 @@ pi install ./pi-ai-gateway
                           设置每百万 token 美元价格
 /ai-gateway set-price remove <模型ID>
                           删除手动模型价格
+/ai-gateway help          查看命令帮助（含 speed）
 ```
 
 ### 交互设置模型覆盖（不用手改 JSON）
@@ -190,6 +214,24 @@ pi install ./pi-ai-gateway
 /ai-gateway overrides add gpt-5.6-sol 272000 64000
 ```
 
+### 交互设置 Speed
+
+`Speed` 是与 `Overrides` 并列的主菜单项，不是覆盖字段：
+
+```text
+/ai-gateway → Speed（或 /ai-gateway speed）
+  → List speeds / Add / update speed / Remove speed
+  → 选择网关（只有一个时跳过）
+```
+
+- `Add / update speed`：手动输入模型 ID，再选择 Off / Fast / Ultrafast；当前值标注 `(current)`，未设置时为 Off。
+- `Remove speed`：从已配置条目中选择。与 Off 不同，移除会删除记录；删除最后一条时也会清理空的 `speed` 字段。
+- 允许预设尚未发现的模型 ID，并显示提示；只有发现模型且 API 兼容后才应用。
+
+例如 `/ai-gateway speed add gpt-5.6-sol fast` 保存 Fast，`/ai-gateway speed remove gpt-5.6-sol` 删除设置。非 UI 模式下，`add` 需提供模型 ID 和档位，`remove` 需提供模型 ID。存在多个网关时，非 UI 命令会提示使用交互菜单，不会任意选择网关。没有独立的 `/fast` 命令。
+
+设置会在刷新和重启后保留。保存或删除后会在当前 Pi 进程重新注册网关，下一次请求生效，不追溯正在执行的请求。若重新注册失败，配置仍已保存，可重试 `/ai-gateway fetch`。
+
 ## 工作原理
 
 ```
@@ -205,19 +247,20 @@ pi install ./pi-ai-gateway
   7. 合并其他用户覆盖
   8. 选择协议：官方 OpenAI Responses 模型 → /v1/responses；其他模型 → /v1/chat/completions
   9. 自动过滤 image/embedding/audio/tts/rerank 类模型
-  10. 注册为 provider：newapi/gpt-5.6-sol
+  10. 对兼容的模型/API 应用已保存的 speed 设置，生成原生 samplingParams 和模型请求头
+  11. 注册为 provider：newapi/gpt-5.6-sol
 ```
 
 ### 配置文件 vs 缓存文件
 
 | | `~/.pi/agent/ai-gateway.json` | `~/.pi/agent/ai-gateway-cache.json` |
 |---|---|---|
-| 内容 | 网关地址、密钥、覆盖设置 | 上次拉到的模型名单快照 |
+| 内容 | 网关地址、密钥、覆盖设置、速度设置 | 上次拉到的模型名单快照 |
 | 谁写的 | 你（或 `/ai-gateway` 命令） | 扩展每次注册时自动覆盖 |
 | 生命周期 | 永久（这是配置） | 易失（随时重写/可删） |
 | 用途 | 你的意志，Pi 启动时读取 | 网关不可达时降级兜底 |
 
-覆盖设置**必须**在配置文件里——缓存每次拉模型都会被重写，放那里会被冲掉。
+覆盖和速度设置**必须**在配置文件里——缓存每次拉模型都会被重写，放那里会被冲掉。
 
 ### contextWindow 覆盖到底影响什么
 
@@ -226,8 +269,16 @@ pi install ./pi-ai-gateway
 ## 开发
 
 ```bash
-npm test        # node --test，纯函数单测
+npm test        # 单元测试和模拟菜单测试；默认跳过可选的 Pi 集成测试
 ```
+
+如需同时验证向本地模拟网关发送的真实 HTTP 请求（不调用付费 API）：
+
+```bash
+PI_TEST_PACKAGE_DIR=/path/to/node_modules/@earendil-works/pi-coding-agent npm test
+```
+
+集成测试使用 Pi 1.3.0 SDK，检查档位参数、请求头清理、请求钩子，以及当前模型设置的即时更新。
 
 ## 故障排查
 

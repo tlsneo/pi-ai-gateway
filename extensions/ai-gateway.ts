@@ -11,7 +11,7 @@
  *   - Per-gateway failure isolation + cache fallback, Pi startup never breaks
  *
  * Config: ~/.pi/agent/ai-gateway.json (see ai-gateway.example.json)
- * Commands: /ai-gateway menu|add|list|fetch|remove|test|overrides|set-price
+ * Commands: /ai-gateway menu|add|list|fetch|remove|test|overrides|speed|set-price
  */
 
 import fs from "node:fs";
@@ -52,6 +52,7 @@ const DEFAULT_API = "openai-completions";
 const OPENAI_RESPONSES_API = "openai-responses";
 const OPENAI_CATALOG_FILENAME = "openai.json";
 const DEFAULT_API_ROUTING = "auto";
+const SPEED_LABELS = { off: "Off", fast: "Fast", ultrafast: "Ultrafast" } as const;
 const DEFAULT_CONTEXT_WINDOW = 128000;
 const DEFAULT_MAX_TOKENS = 16384;
 const PRICING_FETCH_TIMEOUT_MS = 5000;
@@ -103,6 +104,7 @@ const BUILTIN_PROVIDERS = new Set([
 // ===========================================================================
 
 export type ApiRoutingMode = "auto";
+export type ModelSpeed = keyof typeof SPEED_LABELS;
 
 export interface GatewayConfig {
   name: string;
@@ -117,6 +119,8 @@ export interface GatewayConfig {
   pricePreset?: PricePreset;
   /** Optional per-model metadata overrides, e.g. { "gpt-5.6-sol": { "contextWindow": 272000 } } */
   overrides?: Record<string, Partial<ModelMeta>>;
+  /** Exact model ids mapped to requested speed tiers, independent of metadata overrides. */
+  speed?: Record<string, ModelSpeed>;
 }
 
 export interface GatewayFile {
@@ -177,6 +181,18 @@ export function validateGateway(gw: GatewayConfig): string | null {
   }
   if (gw.pricePreset !== undefined && gw.pricePreset !== "models-dev" && gw.pricePreset !== "basellm") {
     return 'pricePreset must be "models-dev" or "basellm"';
+  }
+  if (gw.speed !== undefined) {
+    if (gw.speed === null || typeof gw.speed !== "object" || Array.isArray(gw.speed)) {
+      return "speed must be an object { modelId: off | fast | ultrafast }";
+    }
+    for (const [id, speed] of Object.entries(gw.speed)) {
+      if (!id.trim() || id !== id.trim() || !isModelSpeed(speed)) {
+        return "speed entries require a non-empty, trimmed model id and off, fast, or ultrafast";
+      }
+      const error = modelSpeedError(id, undefined, speed);
+      if (error) return error;
+    }
   }
   if (gw.overrides !== undefined) {
     if (gw.overrides === null || typeof gw.overrides !== "object" || Array.isArray(gw.overrides)) {
@@ -545,6 +561,24 @@ export function resolveModelApi(
   return DEFAULT_API;
 }
 
+function isModelSpeed(value: unknown): value is ModelSpeed {
+  return typeof value === "string" && Object.hasOwn(SPEED_LABELS, value);
+}
+
+function modelSpeedError(id: string, api: string | undefined, speed: ModelSpeed): string | null {
+  if (speed === "off") return null;
+  if (!/^gpt-/i.test(id) || /^gpt-oss(?:-|$)/i.test(id) || NOISE_PATTERN.test(id)) {
+    return "Speed tiers require a GPT chat model id (excluding gpt-oss).";
+  }
+  if (speed === "ultrafast" && api !== undefined && api !== OPENAI_RESPONSES_API) {
+    return "Ultrafast requires openai-responses; the configured protocol is not changed automatically.";
+  }
+  if (api !== undefined && api !== DEFAULT_API && api !== OPENAI_RESPONSES_API) {
+    return `Speed tiers are not supported for API "${api}".`;
+  }
+  return null;
+}
+
 function toProviderModel(
   id: string,
   meta: ModelMeta,
@@ -613,10 +647,24 @@ export async function registerGateway(
     const override = gw.overrides?.[id];
     const meta = applyOverrides(id, borrowMeta(catalog, id), gw.overrides);
     const modelApi = resolveModelApi(gw, id, openAIResponsesModelIds);
-    return toProviderModel(id, {
+    const model = toProviderModel(id, {
       ...meta,
       cost: resolveModelCost(id, gatewayPrices, presetPrices, override?.cost),
     }, modelApi === providerApi ? undefined : modelApi);
+    const speed = gw.speed?.[id];
+    if (speed === "fast" || speed === "ultrafast") {
+      const error = modelSpeedError(id, modelApi, speed);
+      if (error) {
+        console.warn(`[ai-gateway] Speed not applied to "${gw.name}/${id}": ${error}`);
+      } else {
+        return {
+          ...model,
+          samplingParams: { service_tier: speed === "fast" ? "priority" : "ultrafast" },
+          ...(speed === "ultrafast" ? { headers: { "OpenAI-Service-Tier": "ultrafast" } } : {}),
+        };
+      }
+    }
+    return model;
   });
 
   const config: ProviderConfig = {
@@ -662,6 +710,10 @@ export async function gatewayCommand(pi: ExtensionAPI, args: string, ctx: Extens
       return rest.length === 0 && ctx.hasUI
         ? openOverridesMenu(pi, ctx)
         : overridesCommand(pi, ctx, rest.join(" "));
+    case "speed":
+      return rest.length === 0 && ctx.hasUI
+        ? openSpeedMenu(pi, ctx)
+        : speedCommand(pi, ctx, rest);
     case "set-price":
       return setPriceCommand(pi, ctx, rest);
     case "help":
@@ -681,6 +733,7 @@ function mainMenuChoices(): string[] {
       "Test gateway",
       "Prices",
       "Overrides",
+      "Speed",
       "Remove gateway",
       "Help",
     ];
@@ -719,6 +772,7 @@ async function openGatewayMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): 
     if (choice === "Test gateway") await testGatewayCommand(ctx);
     if (choice === "Prices") await openPriceMenu(pi, ctx);
     if (choice === "Overrides") await openOverridesMenu(pi, ctx);
+    if (choice === "Speed") await openSpeedMenu(pi, ctx);
     if (choice === "Remove gateway") await removeGatewayCommand(ctx);
     if (choice === "Help") showGatewayHelp(ctx);
   }
@@ -797,6 +851,106 @@ async function openOverridesMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext)
   if (choice === "Remove override") await overridesCommand(pi, ctx, "remove");
 }
 
+async function openSpeedMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const choice = await ctx.ui.select("AI Gateway speed", ["List speeds", "Add / update speed", "Remove speed"]);
+  if (choice === "List speeds") await speedCommand(pi, ctx, ["list"]);
+  if (choice === "Add / update speed") await speedCommand(pi, ctx, ["add"]);
+  if (choice === "Remove speed") await speedCommand(pi, ctx, ["remove"]);
+}
+
+async function speedCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string[]): Promise<void> {
+  const [action = "list", rawModelId, rawSpeed] = args;
+  if (!["list", "add", "remove"].includes(action) || args.length > (action === "add" ? 3 : action === "remove" ? 2 : 1)) {
+    ctx.ui.notify("Usage: /ai-gateway speed list | add [modelID] [off|fast|ultrafast] | remove [modelID]", "warning");
+    return;
+  }
+  const gw = await pickGateway(ctx);
+  if (!gw) return;
+  let speed = { ...gw.speed };
+  const ids = Object.keys(speed);
+
+  if (action === "list") {
+    ctx.ui.notify(ids.length === 0
+      ? `No speed settings configured for gateway "${gw.name}".`
+      : `Speed settings for "${gw.name}" (requested, not backend-confirmed):\n` +
+        ids.map((id) => `• ${id}: ${SPEED_LABELS[speed[id]]}`).join("\n"), "info");
+    return;
+  }
+
+  let modelId: string | undefined = rawModelId;
+  if (modelId === undefined && ctx.hasUI) {
+    if (action === "add") {
+      modelId = await ctx.ui.input("Model ID (e.g. gpt-5.5)");
+    } else {
+      if (ids.length === 0) {
+        ctx.ui.notify(`No speed settings configured for gateway "${gw.name}".`, "info");
+        return;
+      }
+      const choices = ids.map((id) => `${id} — ${SPEED_LABELS[speed[id]]}`);
+      const choice = await ctx.ui.select("Remove model speed", choices);
+      if (choice === undefined) return;
+      modelId = ids[choices.indexOf(choice)];
+    }
+    if (modelId === undefined) return;
+  }
+  modelId = modelId?.trim();
+  if (!modelId) {
+    ctx.ui.notify("A non-empty model ID is required.", "warning");
+    return;
+  }
+
+  if (action === "remove") {
+    if (!Object.hasOwn(speed, modelId)) {
+      ctx.ui.notify(`No speed setting configured for model "${modelId}".`, "warning");
+      return;
+    }
+    delete speed[modelId];
+  } else {
+    let mode: unknown = rawSpeed;
+    if (mode === undefined && ctx.hasUI) {
+      const modes = Object.keys(SPEED_LABELS) as ModelSpeed[];
+      const current = speed[modelId] ?? "off";
+      const choices = modes.map((value) => `${SPEED_LABELS[value]}${value === current ? " (current)" : ""}`);
+      const choice = await ctx.ui.select(
+        `Speed: ${gw.name}/${modelId}\nRequests a service tier; backend eligibility and extra charges may apply.`, choices,
+      );
+      if (choice === undefined) return;
+      mode = modes[choices.indexOf(choice)];
+    }
+    if (!isModelSpeed(mode)) {
+      ctx.ui.notify("Speed must be off, fast, or ultrafast.", "warning");
+      return;
+    }
+    const registered = ctx.modelRegistry?.find(gw.name, modelId);
+    const responsesIds = buildOpenAIResponsesModelIds(findPiAiDataDir() ?? "");
+    const discovered = registered !== undefined || (loadCache()[gw.name] ?? []).includes(modelId);
+    const api = discovered || gw.api !== undefined || responsesIds.has(modelId)
+      ? resolveModelApi(gw, modelId, responsesIds) : undefined;
+    const error = modelSpeedError(modelId, api, mode);
+    if (error) {
+      ctx.ui.notify(error, "warning");
+      return;
+    }
+    speed = { ...speed, [modelId]: mode };
+    if (!discovered) {
+      ctx.ui.notify(`Model "${modelId}" has not been discovered; this setting applies once it is available on a compatible API.`, "warning");
+    }
+  }
+
+  const next = { ...gw, speed: Object.keys(speed).length > 0 ? speed : undefined };
+  try {
+    updateGateway(next);
+  } catch (error) {
+    ctx.ui.notify(`Speed setting was not saved: ${error instanceof Error ? error.message : String(error)}`, "error");
+    return;
+  }
+  const applied = await reregister(pi, next, ctx);
+  const change = action === "remove" ? "Removed speed setting" : `Saved ${SPEED_LABELS[speed[modelId]]} request mode`;
+  ctx.ui.notify(`${change} for "${gw.name}/${modelId}". ` + (applied
+    ? "Subsequent requests use the updated configuration; backend tier application is not confirmed."
+    : "Configuration saved, but could not be applied; retry /ai-gateway fetch."), applied ? "info" : "warning");
+}
+
 function showGatewayHelp(ctx: ExtensionCommandContext): void {
   ctx.ui.notify(
     "Usage:\n" +
@@ -807,6 +961,7 @@ function showGatewayHelp(ctx: ExtensionCommandContext): void {
       "  /ai-gateway test <name>     Test gateway\n" +
       "  /ai-gateway remove <name>   Remove gateway\n" +
       "  /ai-gateway overrides       Model metadata overrides\n" +
+      "  /ai-gateway speed           Model speed settings (list | add | remove)\n" +
       "  /ai-gateway set-price       Prices and presets",
     "info",
   );
@@ -960,7 +1115,7 @@ async function setPriceCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, a
     }
     case "remove": {
       const overrides = { ...(gw.overrides ?? {}) };
-      let modelId = rest[0];
+      let modelId: string | undefined = rest[0];
       if (!modelId && ctx.hasUI) {
         const manual = Object.entries(overrides).flatMap(([id, override]) => override.cost ? [id] : []);
         if (manual.length === 0) {
@@ -1015,6 +1170,10 @@ async function pickGateway(ctx: ExtensionCommandContext): Promise<GatewayConfig 
     return null;
   }
   if (config.gateways.length === 1) return config.gateways[0];
+  if (!ctx.hasUI) {
+    ctx.ui.notify("Multiple gateways configured. Use /ai-gateway in interactive mode to select one.", "warning");
+    return null;
+  }
   const picked = await ctx.ui.select("Select gateway", config.gateways.map((g) => g.name));
   if (!picked) return null;
   return config.gateways.find((g) => g.name === picked) ?? null;
@@ -1043,7 +1202,7 @@ async function overridesCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, 
     }
     case "remove": {
       const ov = { ...(current.overrides ?? {}) };
-      let modelId = rest[0];
+      let modelId: string | undefined = rest[0];
       if (!modelId && ctx.hasUI) {
         const keys = Object.keys(ov);
         if (keys.length === 0) {
@@ -1074,8 +1233,8 @@ async function overridesCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, 
   }
 }
 
-/** Re-register a gateway so override changes take effect immediately (no restart needed). */
-async function reregister(pi: ExtensionAPI, gw: GatewayConfig, ctx: ExtensionCommandContext): Promise<void> {
+/** Re-register a gateway so config changes take effect immediately (no restart needed). */
+async function reregister(pi: ExtensionAPI, gw: GatewayConfig, ctx: ExtensionCommandContext): Promise<boolean> {
   ctx.ui.setStatus("ai-gateway", `Re-registering ${gw.name}...`);
   try {
     const dataDir = findPiAiDataDir() ?? "";
@@ -1089,6 +1248,10 @@ async function reregister(pi: ExtensionAPI, gw: GatewayConfig, ctx: ExtensionCom
     } else {
       ctx.ui.notify(`Re-registration failed: ${result.error}`, "error");
     }
+    return result.ok;
+  } catch (error) {
+    ctx.ui.notify(`Re-registration failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    return false;
   } finally {
     ctx.ui.setStatus("ai-gateway", undefined);
   }

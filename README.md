@@ -10,6 +10,7 @@ Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ..
 - **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
 - **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers and pricing-only model IDs
 - **Optional price presets**: when a gateway does not publish a model price, opt into Models.dev or BaseLLM defaults per gateway; manual prices always win
+- **Per-model Speed requests**: a separate menu for Off / Fast / Ultrafast, off by default; requests a service tier without confirming backend acceleration
 - **Zero noise**: automatically filters out non-chat models (image / embedding / tts / rerank)
 - **Resilient**: a failing gateway never breaks Pi startup; falls back to a cached model list when offline
 - **Zero dependencies**: pure extension, no third-party npm packages
@@ -42,6 +43,7 @@ Then pick an action:
 - `Fetch models/prices` — refresh model list and prices without restarting Pi
 - `Prices` — choose a fallback preset or set manual prices
 - `Overrides` — adjust context window, max output tokens, thinking support, etc.
+- `Speed` — request Off / Fast / Ultrafast per model, independently of Overrides
 
 Most users should use the menu. The subcommands below remain for scripting or quick one-off changes.
 
@@ -75,6 +77,7 @@ The menu writes `~/.pi/agent/ai-gateway.json` for you. You can also create it ma
 | `headers` | ❌ | Extra request headers |
 | `pricePreset` | ❌ | Missing-price fallback: `"models-dev"` or `"basellm"`; omitted means gateway prices only |
 | `overrides` | ❌ | Per-model metadata and manual price overrides (see below) |
+| `speed` | ❌ | Per-model `"off"`, `"fast"`, or `"ultrafast"` requests, separate from `overrides` (see below) |
 
 Protocol precedence:
 
@@ -110,6 +113,20 @@ By default, capabilities come from Pi's built-in catalog, while prices come from
 ```
 
 Supported fields: `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`. A manual `cost` override has the highest priority. Only listed models are affected; everything else stays automatic. When `contextWindow` is set, Pi auto-compacts before reaching the limit, so requests never exceed it.
+
+### speed: per-model service-tier requests (optional)
+
+Each gateway accepts `speed?: Record<modelId, "off" | "fast" | "ultrafast">`, keyed by exact model ID and stored separately from `overrides`. Speed is off by default; `ai-gateway.example.json` includes an opt-in placeholder.
+
+| Mode | Effect at model registration |
+|---|---|
+| `off` | Keeps an explicit record but adds no speed request parameters |
+| `fast` | Sets `samplingParams.service_tier` to `"priority"` |
+| `ultrafast` | Sets `samplingParams.service_tier` to `"ultrafast"` and the model header `OpenAI-Service-Tier: ultrafast` |
+
+Fast and Ultrafast accept `gpt-` chat model IDs, excluding `gpt-oss` and non-chat models such as image models, without a hard-coded model allowlist. Fast supports only `openai-completions` / `openai-responses`; Ultrafast requires `openai-responses`. Speed does not change existing routing or probe backend capabilities.
+
+**These are requested tiers, not confirmed acceleration.** Gateways may discard or reject the parameters, or charge extra. Price resolution is unchanged: Pi displays estimates, not tier-accurate billing. Higher-priority configuration from other extensions or `models.json` can override the native parameters; Off does not guarantee that external settings are disabled.
 
 ### Price resolution and presets
 
@@ -159,6 +176,12 @@ The interactive `/ai-gateway` menu is the default UI. These direct commands are 
                           Interactively set an override (current catalog value shown as default)
 /ai-gateway overrides remove <modelID>
                           Remove an override for a model
+/ai-gateway speed         Open the Speed menu (list saved settings without UI)
+/ai-gateway speed list    List saved speed requests, not backend-confirmed tiers
+/ai-gateway speed add [modelID] [off|fast|ultrafast]
+                          Add or update a model's speed request
+/ai-gateway speed remove [modelID]
+                          Remove a saved speed entry
 /ai-gateway set-price show
                           Show this gateway's fallback preset and manual model prices
 /ai-gateway set-price preset <none|models-dev|basellm>
@@ -167,6 +190,7 @@ The interactive `/ai-gateway` menu is the default UI. These direct commands are 
                           Set a manual USD-per-1M-token price
 /ai-gateway set-price remove <modelID>
                           Remove a manual model price
+/ai-gateway help          Show command help, including speed
 ```
 
 ### Setting overrides interactively (no manual JSON editing)
@@ -190,6 +214,24 @@ Or pass arguments directly to skip the corresponding numeric prompts:
 /ai-gateway overrides add gpt-5.6-sol 272000 64000
 ```
 
+### Setting speed interactively
+
+`Speed` is a top-level menu alongside `Overrides`, not an override field:
+
+```text
+/ai-gateway → Speed (or /ai-gateway speed)
+  → List speeds / Add / update speed / Remove speed
+  → choose a gateway (skipped when only one is configured)
+```
+
+- `Add / update speed`: type the model ID manually, then choose Off / Fast / Ultrafast. The current value is marked `(current)` (Off when unset).
+- `Remove speed`: choose from saved entries. Unlike Off, removal deletes the record; removing the last entry also removes the empty `speed` field.
+- You can preset an undiscovered model ID, with a warning; the setting applies only after discovery on a compatible API.
+
+For example, `/ai-gateway speed add gpt-5.6-sol fast` saves Fast, and `/ai-gateway speed remove gpt-5.6-sol` removes it. Without UI, `add` requires both model ID and mode; `remove` requires a model ID. With multiple gateways, non-UI commands ask you to use the interactive menu rather than choosing a gateway arbitrarily. There is no standalone `/fast` command.
+
+Settings survive refreshes and restarts. Saving or removing re-registers the gateway in the current Pi process for the next request, with no effect on requests already in flight. If re-registration fails, the configuration remains saved; retry `/ai-gateway fetch`.
+
 ## How it works
 
 ```
@@ -205,19 +247,20 @@ At startup, or when you run /ai-gateway fetch, for each gateway:
   7. Merge remaining user overrides
   8. Choose protocol: canonical OpenAI Responses models → /v1/responses; other models → /v1/chat/completions
   9. Filter out image/embedding/audio/tts/rerank models
-  10. Register as provider: newapi/gpt-5.6-sol
+  10. Apply saved speed settings for compatible model/API pairs as native samplingParams and model headers
+  11. Register as provider: newapi/gpt-5.6-sol
 ```
 
 ### Config file vs cache file
 
 | | `~/.pi/agent/ai-gateway.json` | `~/.pi/agent/ai-gateway-cache.json` |
 |---|---|---|
-| Content | Gateway URL, key, overrides | Snapshot of the last fetched model list |
+| Content | Gateway URL, key, overrides, speed settings | Snapshot of the last fetched model list |
 | Written by | You (or the `/ai-gateway` commands) | The extension, overwritten on every registration |
 | Lifetime | Permanent (this is the config) | Ephemeral (rewritten anytime, safe to delete) |
 | Purpose | Your intent, read at Pi startup | Offline fallback when the gateway is unreachable |
 
-Overrides **must** live in the config file — the cache is rewritten on every model fetch and would wipe them.
+Overrides and speed settings **must** live in the config file — the cache is rewritten on every model fetch and would wipe them.
 
 ### What a contextWindow override actually affects
 
@@ -226,8 +269,16 @@ Overrides **must** live in the config file — the cache is rewritten on every m
 ## Development
 
 ```bash
-npm test        # node --test, pure-function unit tests
+npm test        # unit and mocked-menu tests; optional Pi integration is skipped
 ```
+
+To also verify real HTTP requests against a local mock gateway (no paid API calls):
+
+```bash
+PI_TEST_PACKAGE_DIR=/path/to/node_modules/@earendil-works/pi-coding-agent npm test
+```
+
+The integration test uses Pi 1.3.0's SDK and checks tier parameters, header cleanup, request hooks, and immediate updates to the selected model.
 
 ## Troubleshooting
 
