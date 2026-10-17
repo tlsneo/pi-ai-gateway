@@ -111,7 +111,7 @@ export interface GatewayConfig {
   name: string;
   baseUrl: string;
   apiKey: string;
-  /** Optional gateway-wide API override. Takes precedence over apiRouting. */
+  /** Optional gateway-wide API override. Model overrides take precedence; otherwise overrides apiRouting. */
   api?: string;
   /** Per-model protocol routing. New gateways default to "auto". */
   apiRouting?: ApiRoutingMode;
@@ -199,6 +199,14 @@ export function validateGateway(gw: GatewayConfig): string | null {
     if (gw.overrides === null || typeof gw.overrides !== "object" || Array.isArray(gw.overrides)) {
       return "overrides must be an object { modelId: { contextWindow?: number, ... } }";
     }
+    for (const [id, override] of Object.entries(gw.overrides)) {
+      if (!id.trim() || id !== id.trim() || override === null || typeof override !== "object" || Array.isArray(override)) {
+        return "overrides entries require a non-empty, trimmed model id and an object";
+      }
+      if (override.api !== undefined && override.api !== DEFAULT_API && override.api !== OPENAI_RESPONSES_API) {
+        return `Override api for "${id}" must be openai-completions or openai-responses (omit to follow gateway).`;
+      }
+    }
   }
   return null;
 }
@@ -236,6 +244,8 @@ export function saveConfig(file: GatewayFile): void {
 // ===========================================================================
 
 export interface ModelMeta {
+  /** Explicit per-model routing, set only by user overrides, never borrowed from the metadata catalog. */
+  api?: "openai-completions" | "openai-responses";
   name?: string;
   reasoning: boolean;
   thinkingLevelMap?: Record<string, string | null>;
@@ -553,10 +563,12 @@ export function saveCache(cache: Record<string, string[]>): void {
 }
 
 export function resolveModelApi(
-  gateway: Pick<GatewayConfig, "api" | "apiRouting">,
+  gateway: Pick<GatewayConfig, "api" | "apiRouting" | "overrides">,
   modelId: string,
   openAIResponsesModelIds: ReadonlySet<string>,
 ): ProviderConfig["api"] {
+  const modelApi = gateway.overrides?.[modelId]?.api;
+  if (modelApi !== undefined) return modelApi;
   if (gateway.api !== undefined) return gateway.api as ProviderConfig["api"];
   if (gateway.apiRouting === "auto" && openAIResponsesModelIds.has(modelId)) return OPENAI_RESPONSES_API;
   return DEFAULT_API;
@@ -934,7 +946,7 @@ async function speedCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, args
     const registered = ctx.modelRegistry?.find(gw.name, modelId);
     const responsesIds = buildOpenAIResponsesModelIds(findPiAiDataDir() ?? "");
     const discovered = registered !== undefined || (loadCache()[gw.name] ?? []).includes(modelId);
-    const api = discovered || gw.api !== undefined || responsesIds.has(modelId)
+    const api = discovered || gw.overrides?.[modelId]?.api !== undefined || gw.api !== undefined || responsesIds.has(modelId)
       ? resolveModelApi(gw, modelId, responsesIds) : undefined;
     const error = modelSpeedError(modelId, api, mode);
     if (error) {
@@ -1289,6 +1301,10 @@ async function overridesAdd(
     if (!modelId) return;
   }
   modelId = modelId.trim();
+  if (!modelId) {
+    ui.notify("A non-empty model ID is required.", "warning");
+    return;
+  }
 
   const catalogBase = borrowMeta(catalog, modelId);
   const existingOverride = currentOv[modelId] ?? {};
@@ -1296,6 +1312,18 @@ async function overridesAdd(
   const curCtx = base.contextWindow;
   const curMax = base.maxTokens;
   const curReasoning = base.reasoning;
+  let api = existingOverride.api;
+  if (ctx.hasUI) {
+    const values = [undefined, DEFAULT_API, OPENAI_RESPONSES_API] as const;
+    const labels = ["Auto (follow gateway)", "Chat Completions (/v1/chat/completions)", "Responses (/v1/responses)"];
+    const choices = ["Keep", ...labels.map((label, i) => `${label}${values[i] === api ? " (current)" : ""}`)];
+    const choice = await ui.select(
+      `API routing: ${gw.name}/${modelId} (effective: ${resolveModelApi(gw, modelId, buildOpenAIResponsesModelIds(findPiAiDataDir() ?? ""))})\nAuto removes the model API override and follows gateway routing. The backend must support the selected API.`,
+      choices,
+    );
+    if (choice === undefined) return;
+    if (choice !== "Keep") api = values[choices.indexOf(choice) - 1];
+  }
 
   let contextWindow: number | undefined;
   if (argCtx !== null) {
@@ -1305,7 +1333,8 @@ async function overridesAdd(
       `Context window (current ${curCtx}, Enter to keep, e.g. 272000)`,
       String(curCtx),
     );
-    if (input !== undefined && input.trim() !== "") {
+    if (input === undefined) return;
+    if (input.trim() !== "") {
       const n = toPositiveInt(input);
       if (n === null) {
         ui.notify("Context window must be a positive integer", "error");
@@ -1320,7 +1349,8 @@ async function overridesAdd(
     maxTokens = argMax;
   } else if (ctx.hasUI) {
     const input = await ui.input(`Max output tokens (current ${curMax}, Enter to keep)`, String(curMax));
-    if (input !== undefined && input.trim() !== "") {
+    if (input === undefined) return;
+    if (input.trim() !== "") {
       const n = toPositiveInt(input);
       if (n === null) {
         ui.notify("maxTokens must be a positive integer", "error");
@@ -1362,21 +1392,29 @@ async function overridesAdd(
       };
     }
   }
-  currentOv[modelId] = { ...existingOverride, ...ov };
-  const cleaned = stripRedundant(currentOv, catalog);
+  currentOv[modelId] = Object.keys(ov).length > 0
+    ? stripRedundant({ [modelId]: { ...existingOverride, ...ov } }, catalog)[modelId] ?? {}
+    : { ...existingOverride };
+  if (api === undefined) delete currentOv[modelId].api;
+  else currentOv[modelId].api = api;
+  if (Object.keys(currentOv[modelId]).length === 0) delete currentOv[modelId];
 
-  const config = loadConfig();
-  const next = { ...gw, overrides: Object.keys(cleaned).length > 0 ? cleaned : undefined };
-  saveConfig({ gateways: config.gateways.map((g) => (g.name === gw.name ? next : g)) });
-
-  const changed = Object.keys(ov).length > 0;
-  ui.notify(
-    changed
-      ? `Saved override for "${modelId}": ${JSON.stringify(ov)}, re-registering...`
-      : `No changes`,
-    "info",
-  );
-  if (changed) await reregister(pi, next, ctx);
+  const changed = api !== existingOverride.api || Object.keys(ov).length > 0;
+  if (!changed) {
+    ui.notify("No changes", "info");
+    return;
+  }
+  const next = { ...gw, overrides: Object.keys(currentOv).length > 0 ? currentOv : undefined };
+  try {
+    updateGateway(next);
+  } catch (error) {
+    ui.notify(`Override was not saved: ${error instanceof Error ? error.message : String(error)}`, "error");
+    return;
+  }
+  const applied = await reregister(pi, next, ctx);
+  ui.notify(`Saved override for "${gw.name}/${modelId}". ` + (applied
+    ? "Subsequent requests use the updated configuration."
+    : "Configuration saved, but could not be applied; retry /ai-gateway fetch."), applied ? "info" : "warning");
 }
 
 /** Drop overrides that match the catalog value, keeping the config clean. */
@@ -1389,6 +1427,11 @@ function stripRedundant(
     const base = borrowMeta(catalog, id);
     const diff: Partial<ModelMeta> = {};
     for (const key of Object.keys(ov) as Array<keyof ModelMeta>) {
+      // Keep explicit protocol intent even when today's gateway/catalog default matches.
+      if (key === "api") {
+        if (ov.api !== undefined) diff.api = ov.api;
+        continue;
+      }
       if (key === "cost") {
         if (ov.cost !== undefined) diff.cost = ov.cost;
         continue;

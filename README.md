@@ -6,7 +6,7 @@ Register any OpenAI-compatible gateway (newapi, one-api, self-hosted proxies, ..
 
 - **Interactive TUI menu**: run `/ai-gateway` to manage gateways without memorizing subcommands
 - **Automatic model discovery**: fetches `{baseUrl}/v1/models` at startup; run `/ai-gateway fetch` anytime to refresh models/prices without restart
-- **Automatic protocol routing**: newly added gateways send canonical OpenAI models to `/v1/responses` and other models to `/v1/chat/completions`
+- **Per-model protocol routing**: model API overrides take priority over gateway settings; newly added gateways default to `/v1/responses` for canonical OpenAI Responses models and `/v1/chat/completions` for others
 - **Automatic metadata borrowing**: imports thinking support / thinking levels / context window / compat from Pi's built-in model catalog (the one refreshed by `pi update --models`)
 - **Gateway-aware pricing**: uses NewAPI-compatible `{gatewayRoot}/api/pricing` whenever available, including context-length price tiers and pricing-only model IDs
 - **Optional price presets**: when a gateway does not publish a model price, opt into Models.dev or BaseLLM defaults per gateway; manual prices always win
@@ -42,7 +42,7 @@ Then pick an action:
 - `Add gateway` — save a new OpenAI-compatible gateway
 - `Fetch models/prices` — refresh model list and prices without restarting Pi
 - `Prices` — choose a fallback preset or set manual prices
-- `Overrides` — adjust context window, max output tokens, thinking support, etc.
+- `Overrides` — choose per-model API routing and adjust context window, max output tokens, thinking support, etc.
 - `Speed` — request Off / Fast / Ultrafast per model, independently of Overrides
 
 Most users should use the menu. The subcommands below remain for scripting or quick one-off changes.
@@ -65,33 +65,33 @@ The menu writes `~/.pi/agent/ai-gateway.json` for you. You can also create it ma
 }
 ```
 
-`apiRouting: "auto"` is the default written by `/ai-gateway add`: models declared as `openai-responses` in Pi's canonical `openai.json` use `/v1/responses`, while all other models continue to use `/v1/chat/completions`. `pricePreset` is optional; omit it if you only want prices published by the gateway itself.
+`apiRouting: "auto"` is the default written by `/ai-gateway add`: unless a model or gateway `api` is explicit, models declared as `openai-responses` in Pi's canonical `openai.json` use `/v1/responses`, while all other models use `/v1/chat/completions`. `pricePreset` is optional; omit it if you only want prices published by the gateway itself.
 
 | Field | Required | Description |
 |---|---|---|
 | `name` | ✅ | Provider name; models appear as `newapi/gpt-5.6-sol`. Must not collide with built-in Pi providers |
 | `baseUrl` | ✅ | Gateway URL; `/v1` is appended automatically if missing |
 | `apiKey` | ✅ | Write the key directly (the `$ENV` reference syntax is also supported) |
-| `api` | ❌ | Force one Pi API type for the whole gateway; takes precedence over `apiRouting` |
-| `apiRouting` | ❌ | `"auto"`: canonical OpenAI Responses models use `openai-responses`, other models use `openai-completions`; written by default for gateways created with `/ai-gateway add` |
+| `api` | ❌ | Gateway-wide Pi API type for models without `overrides[modelId].api`; takes precedence over `apiRouting` |
+| `apiRouting` | ❌ | `"auto"`: when neither model nor gateway has an explicit `api`, canonical OpenAI Responses models use `openai-responses`, others use `openai-completions`; written by default for gateways created with `/ai-gateway add` |
 | `headers` | ❌ | Extra request headers |
 | `pricePreset` | ❌ | Missing-price fallback: `"models-dev"` or `"basellm"`; omitted means gateway prices only |
-| `overrides` | ❌ | Per-model metadata and manual price overrides (see below) |
+| `overrides` | ❌ | Per-model API routing, metadata, and manual price overrides (see below) |
 | `speed` | ❌ | Per-model `"off"`, `"fast"`, or `"ultrafast"` requests, separate from `overrides` (see below) |
 
 Protocol precedence:
 
 ```text
-explicit api > apiRouting: "auto" > openai-completions
+overrides[modelId].api > gateway api > apiRouting: "auto" (canonical catalog) > openai-completions
 ```
 
-Automatic detection uses Pi's bundled `openai.json`, not a `gpt-` name prefix, so `gpt-oss-*` and unregistered gateway aliases stay on Chat Completions by default. Regular API-key gateways use `openai-responses`, not `openai-codex-responses`. If the gateway does not support `/v1/responses`, set `"api": "openai-completions"` explicitly.
+Automatic routing uses Pi's bundled `openai.json`, not a `gpt-` name prefix, so `gpt-oss-*` and unregistered gateway aliases stay on Chat Completions unless explicitly routed otherwise. Regular API-key gateways use `openai-responses`, not `openai-codex-responses`. If the gateway does not support `/v1/responses`, set `"api": "openai-completions"` on the model, or on the gateway for models without a model API override. Routing does not probe backend support or automatically fall back to another protocol; a configured API does not guarantee that the gateway supports it.
 
 If you edit the JSON manually, restart Pi or run `/ai-gateway fetch`; all models then appear under `/model` with the configured provider prefix.
 
 > Key security: the config file lives outside the repo and is chmod 600 automatically. Only `ai-gateway.example.json` (placeholders, zero secrets) is committed. Never commit the real config file.
 
-### overrides: per-model metadata overrides (optional)
+### overrides: per-model API routing and metadata overrides (optional)
 
 By default, capabilities come from Pi's built-in catalog, while prices come from the gateway's `/api/pricing` endpoint when it is available. Individual models can still be adjusted manually:
 
@@ -103,7 +103,7 @@ By default, capabilities come from Pi's built-in catalog, while prices come from
       "baseUrl": "https://your-gateway.example.com/v1",
       "apiKey": "sk-xxx",
       "overrides": {
-        "gpt-5.6-sol": { "contextWindow": 272000 },
+        "gpt-5.6-sol": { "api": "openai-responses", "contextWindow": 272000 },
         "gpt-5.6-terra": { "contextWindow": 272000, "maxTokens": 64000 },
         "hy3-preview": { "reasoning": true }
       }
@@ -112,19 +112,19 @@ By default, capabilities come from Pi's built-in catalog, while prices come from
 }
 ```
 
-Supported fields: `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`. A manual `cost` override has the highest priority. Only listed models are affected; everything else stays automatic. When `contextWindow` is set, Pi auto-compacts before reaching the limit, so requests never exceed it.
+Supported fields: `api` / `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`. `GatewayConfig.overrides[modelId].api` is optional and accepts only `"openai-completions"` (`/v1/chat/completions`) or `"openai-responses"` (`/v1/responses`), keyed by exact model ID. Omit it to follow gateway routing; it takes precedence over the gateway's `api` when present. Explicit API choices are preserved even when they match the catalog default, not deduplicated away. A manual `cost` override has the highest priority. Only listed models receive these overrides; other models retain gateway routing and default metadata. When `contextWindow` is set, Pi auto-compacts before reaching the limit, so requests never exceed it.
 
 ### speed: per-model service-tier requests (optional)
 
 Each gateway accepts `speed?: Record<modelId, "off" | "fast" | "ultrafast">`, keyed by exact model ID and stored separately from `overrides`. Speed is off by default; `ai-gateway.example.json` includes an opt-in placeholder.
 
-| Mode | Effect at model registration |
+| Mode | Effect at model registration (compatible model/API pairs) |
 |---|---|
 | `off` | Keeps an explicit record but adds no speed request parameters |
 | `fast` | Sets `samplingParams.service_tier` to `"priority"` |
 | `ultrafast` | Sets `samplingParams.service_tier` to `"ultrafast"` and the model header `OpenAI-Service-Tier: ultrafast` |
 
-Fast and Ultrafast accept `gpt-` chat model IDs, excluding `gpt-oss` and non-chat models such as image models, without a hard-coded model allowlist. Fast supports only `openai-completions` / `openai-responses`; Ultrafast requires `openai-responses`. Speed does not change existing routing or probe backend capabilities.
+Fast and Ultrafast accept `gpt-` chat model IDs, excluding `gpt-oss` and non-chat models such as image models, without a hard-coded model allowlist. Compatibility is checked against each model's final API after routing precedence: Fast supports `openai-completions` and `openai-responses`; Ultrafast requires `openai-responses`. If a later API change makes the saved mode incompatible, the speed record is retained but no speed tier or header is sent; switching back to a compatible API (Responses for Ultrafast) enables it again. Speed does not change routing, probe backend capabilities, or automatically fall back.
 
 The current model's registered tier appears as `⚡ Fast` or `⚡⚡ Ultrafast` in the footer; Off / no tier is hidden. It updates on save, removal, model switches, and session start/reload. With an updated [pi-cometix-footer](https://github.com/tlsneo/pi-cometix-footer), it sits beside the thinking level; Pi's default footer shows it as an extension status. Update both packages and run `/reload` to enable this placement. The status key is `ai-gateway-speed`; it reflects registered request parameters, not just a saved setting that may have failed to apply.
 
@@ -198,18 +198,31 @@ The interactive `/ai-gateway` menu is the default UI. These direct commands are 
 ### Setting overrides interactively (no manual JSON editing)
 
 ```
-/ai-gateway overrides add
-  → enter model ID (e.g. gpt-5.6-sol)
+/ai-gateway → Overrides → Add override (or /ai-gateway overrides add)
+  → manually enter the exact model ID (e.g. gpt-5.6-sol)
+  → API routing? Keep / Auto (follow gateway) /
+      Chat Completions (/v1/chat/completions) / Responses (/v1/responses)
   → context window? press Enter to keep the current catalog value, or enter 272000
   → max output tokens? press Enter to keep
   → thinking support? keep / true / false
   → when thinking is enabled: keep / disable xhigh and max / xhigh only / max only / both
-  → saved and re-registered automatically — takes effect immediately
+  → saved and re-registered automatically — the next request uses the new routing
 ```
 
-You can also enter via `/ai-gateway overrides` → `Add override`. Extended-level choices are saved as `thinkingLevelMap`, preserving lower-level restrictions and existing API mappings; Esc at this step cancels without saving. Only enable levels your gateway/model actually supports: the plugin does not probe backend capabilities. After saving, use Pi's `/thinking` picker or Shift+Tab to select the session's thinking level.
+API routing choices:
 
-Or pass arguments directly to skip the corresponding numeric prompts:
+- `Keep` preserves the model's existing `api` field (or leaves it absent).
+- `Auto (follow gateway)` deletes only the model's `api` field and follows gateway routing. It does **not** force automatic detection: an explicit gateway `api` still takes precedence over `apiRouting: "auto"`.
+- `Chat Completions (/v1/chat/completions)` saves `"api": "openai-completions"` on the model.
+- `Responses (/v1/responses)` saves `"api": "openai-responses"` on the model.
+
+Among the last three choices, the saved per-model choice is marked `(current)`; an absent model `api` marks Auto, even when the gateway has an explicit API. Explicit choices are retained even if they match the catalog default. Numeric and thinking prompts are unchanged. Esc/cancellation at any step saves nothing.
+
+Saving or removing an override re-registers the gateway. The currently selected model uses the updated API on its next request without reselecting it, while preserving the session's thinking level and other state; requests already in flight are unchanged. If re-registration fails, the configuration remains saved; retry `/ai-gateway fetch`.
+
+Extended-level choices are saved as `thinkingLevelMap`, preserving lower-level restrictions and existing API mappings. Only enable levels your gateway/model actually supports: the plugin does not probe backend capabilities. After saving, use Pi's `/thinking` picker or Shift+Tab if you want to change the session's thinking level.
+
+Or pass arguments directly to skip the corresponding numeric prompts. Existing non-UI command arguments are unchanged; no API routing argument is added. Without UI, set per-model `api` via the manual JSON configuration above, then run `/ai-gateway fetch` or restart Pi:
 
 ```
 /ai-gateway overrides add gpt-5.6-sol 272000
@@ -247,9 +260,10 @@ At startup, or when you run /ai-gateway fetch, for each gateway:
      Not found → safe defaults (no thinking, 128K)
   6. Resolve price: manual > gateway > selected preset > $0
   7. Merge remaining user overrides
-  8. Choose protocol: canonical OpenAI Responses models → /v1/responses; other models → /v1/chat/completions
+  8. Choose protocol: model overrides.api > gateway api > apiRouting: auto (canonical catalog) > openai-completions
   9. Filter out image/embedding/audio/tts/rerank models
-  10. Apply saved speed settings for compatible model/API pairs as native samplingParams and model headers
+  10. Check speed against each model's final API; apply compatible settings as native samplingParams and model headers
+      Incompatible settings stay saved, but add no speed tier/header
   11. Register as provider: newapi/gpt-5.6-sol
 ```
 

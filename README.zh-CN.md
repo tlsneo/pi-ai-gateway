@@ -6,7 +6,7 @@
 
 - **交互式 TUI 菜单**：运行 `/ai-gateway`，不用记子命令也能管理网关
 - **自动发现模型**：启动时 fetch `{baseUrl}/v1/models`；也可随时 `/ai-gateway fetch` 刷新模型和价格，无需重启
-- **自动协议路由**：新建网关默认让 Pi 官方 OpenAI 模型走 `/v1/responses`，其他模型走 `/v1/chat/completions`
+- **按模型协议路由**：模型 API 覆盖优先于网关设置；新建网关默认让官方目录中的 OpenAI Responses 模型走 `/v1/responses`，其他模型走 `/v1/chat/completions`
 - **自动借元数据**：从 Pi 内置模型目录（`pi update --models` 刷新的那份）借用思考强度 / 思考档位 / 上下文 / compat
 - **网关实际价格优先**：网关支持时自动读取 `{网关根地址}/api/pricing`，包括按上下文长度分档的价格，也会补上只出现在价格表里的模型
 - **可选价格预设**：网关缺少某模型价格时，可按网关显式选择 Models.dev 或 BaseLLM；手动价格始终最高优先级
@@ -42,7 +42,7 @@ pi install ./pi-ai-gateway
 - `Add gateway` — 添加 OpenAI 兼容网关
 - `Fetch models/prices` — 不重启 Pi，刷新模型列表和价格
 - `Prices` — 选择价格回退预设或设置手动价格
-- `Overrides` — 调整上下文、最大输出、思考支持等模型元数据
+- `Overrides` — 选择逐模型 API 路由，调整上下文、最大输出、思考支持等模型元数据
 - `Speed` — 按模型请求 Off / Fast / Ultrafast，与 Overrides 独立
 
 大多数情况下直接用菜单即可。下面的子命令保留给脚本或快速操作。
@@ -65,33 +65,33 @@ pi install ./pi-ai-gateway
 }
 ```
 
-`apiRouting: "auto"` 是 `/ai-gateway add` 创建新网关时的默认值：Pi 官方 `openai.json` 中声明为 `openai-responses` 的模型使用 `/v1/responses`，其余模型继续使用 `/v1/chat/completions`。`pricePreset` 是可选项；如果只希望使用网关自己公布的价格，可以省略。
+`apiRouting: "auto"` 是 `/ai-gateway add` 创建新网关时的默认值：未显式设置模型或网关 `api` 时，Pi 官方 `openai.json` 中声明为 `openai-responses` 的模型使用 `/v1/responses`，其余模型使用 `/v1/chat/completions`。`pricePreset` 是可选项；如果只希望使用网关自己公布的价格，可以省略。
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `name` | ✅ | provider 名，模型显示为 `newapi/gpt-5.6-sol`；不能与 Pi 内置 provider 重名 |
 | `baseUrl` | ✅ | 网关地址；缺 `/v1` 会自动补 |
 | `apiKey` | ✅ | 直接写密钥（也支持 `$ENV` 引用语法） |
-| `api` | ❌ | 强制整个网关使用一种 Pi API 类型；设置后优先于 `apiRouting` |
-| `apiRouting` | ❌ | `"auto"`：OpenAI 官方 Responses 模型走 `openai-responses`，其他模型走 `openai-completions`；通过 `/ai-gateway add` 新建时默认写入 |
+| `api` | ❌ | 未设置 `overrides[modelId].api` 的模型使用此网关级 Pi API 类型；优先于 `apiRouting` |
+| `apiRouting` | ❌ | `"auto"`：模型和网关均未显式设置 `api` 时，官方目录中的 OpenAI Responses 模型走 `openai-responses`，其他模型走 `openai-completions`；通过 `/ai-gateway add` 新建时默认写入 |
 | `headers` | ❌ | 附加请求头 |
 | `pricePreset` | ❌ | 缺失价格回退：`"models-dev"` 或 `"basellm"`；省略时只采用网关价格 |
-| `overrides` | ❌ | 按模型覆盖元数据及手动价格（见下） |
+| `overrides` | ❌ | 按模型覆盖 API 路由、元数据及手动价格（见下） |
 | `speed` | ❌ | 按模型请求 `"off"`、`"fast"` 或 `"ultrafast"`，与 `overrides` 分开存储（见下） |
 
 协议选择优先级：
 
 ```text
-显式 api > apiRouting: "auto" > openai-completions
+overrides[modelId].api > 网关 api > apiRouting: "auto"（canonical 目录）> openai-completions
 ```
 
-自动识别依据是 Pi 自带的 `openai.json`，不是 `gpt-` 前缀，因此 `gpt-oss-*` 和未登记的网关别名默认仍走 Chat Completions。普通 API Key 网关使用的是 `openai-responses`，不是 `openai-codex-responses`。网关如果不支持 `/v1/responses`，可显式设置 `"api": "openai-completions"`。
+自动路由依据是 Pi 自带的 `openai.json`，不是 `gpt-` 前缀，因此 `gpt-oss-*` 和未登记的网关别名在未显式指定协议时仍走 Chat Completions。普通 API Key 网关使用的是 `openai-responses`，不是 `openai-codex-responses`。网关如果不支持 `/v1/responses`，可在模型上显式设置 `"api": "openai-completions"`，或在网关上设置以影响未设模型 API 覆盖的模型。路由不会探测后端支持情况，也不会自动回退到另一协议；配置某种 API 不代表真实网关支持它。
 
 如果手动改 JSON，重启 Pi 或运行 `/ai-gateway fetch`；之后 `/model` 里即可看到对应 provider 前缀的全部模型。
 
 > 密钥安全：配置文件在仓库外，权限自动设为 600。仓库里只有 `ai-gateway.example.json`（占位符，零密钥），请勿提交真实配置文件。
 
-### overrides：按模型覆盖元数据（可选）
+### overrides：按模型覆盖 API 路由和元数据（可选）
 
 默认情况下，能力信息来自 Pi 内置目录；价格则优先来自网关自身的 `/api/pricing`。个别模型仍可手动调整：
 
@@ -103,7 +103,7 @@ pi install ./pi-ai-gateway
       "baseUrl": "https://your-gateway.example.com/v1",
       "apiKey": "sk-xxx",
       "overrides": {
-        "gpt-5.6-sol": { "contextWindow": 272000 },
+        "gpt-5.6-sol": { "api": "openai-responses", "contextWindow": 272000 },
         "gpt-5.6-terra": { "contextWindow": 272000, "maxTokens": 64000 },
         "hy3-preview": { "reasoning": true }
       }
@@ -112,19 +112,19 @@ pi install ./pi-ai-gateway
 }
 ```
 
-支持覆盖的字段：`contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`。手动 `cost` 覆盖拥有最高优先级。只覆盖列出的模型，其余模型照常自动。设置 `contextWindow` 后 Pi 会在接近上限时自动压缩，请求不会超限。
+支持覆盖的字段：`api` / `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` / `cost` / `compat` / `name`。`GatewayConfig.overrides[modelId].api` 可选，以精确模型 ID 为键，仅允许 `"openai-completions"`（`/v1/chat/completions`）或 `"openai-responses"`（`/v1/responses`）。省略时跟随网关路由，设置时优先于网关 `api`。显式 API 选择始终保留，即使与目录默认值相同也不去重删除。手动 `cost` 覆盖拥有最高优先级。只覆盖列出的模型，其余模型沿用网关路由和默认元数据。设置 `contextWindow` 后 Pi 会在接近上限时自动压缩，请求不会超限。
 
 ### speed：按模型请求服务档位（可选）
 
 每个网关支持 `speed?: Record<modelId, "off" | "fast" | "ultrafast">`，以精确模型 ID 为键，与 `overrides` 分开存储。默认关闭；`ai-gateway.example.json` 包含一个显式启用的占位示例。
 
-| 档位 | 模型注册时的效果 |
+| 档位 | 模型/API 兼容时的注册效果 |
 |---|---|
 | `off` | 保留显式记录，但不附加速度请求参数 |
 | `fast` | 设置 `samplingParams.service_tier` 为 `"priority"` |
 | `ultrafast` | 设置 `samplingParams.service_tier` 为 `"ultrafast"`，并附加模型请求头 `OpenAI-Service-Tier: ultrafast` |
 
-Fast 和 Ultrafast 接受 `gpt-` 聊天模型 ID，排除 `gpt-oss` 及 image 等非聊天模型，不硬编码型号白名单。Fast 仅支持 `openai-completions` / `openai-responses`；Ultrafast 必须使用 `openai-responses`。Speed 不改变现有路由，也不检测后端能力。
+Fast 和 Ultrafast 接受 `gpt-` 聊天模型 ID，排除 `gpt-oss` 及 image 等非聊天模型，不硬编码型号白名单。兼容性按路由优先级解析后的逐模型最终 API 校验：Fast 支持 `openai-completions` 和 `openai-responses`；Ultrafast 仅支持 `openai-responses`。之后修改 API 导致已存档位不兼容时，保留 speed 记录，但不发送速度 tier 或 header；切回兼容 API（Ultrafast 为 Responses）后可重新启用。Speed 不改变路由、不探测后端能力，也不自动 fallback。
 
 当前模型已注册的请求档位会在 footer 显示为 `⚡ Fast` 或 `⚡⚡ Ultrafast`；Off / 无档位时隐藏。保存、删除、切换模型、启动或重载会同步更新。更新后的 [pi-cometix-footer](https://github.com/tlsneo/pi-cometix-footer) 会把它放在思考强度旁；Pi 默认 footer 则显示为普通扩展状态。更新两个包后运行 `/reload` 即可启用该位置。状态键为 `ai-gateway-speed`，依据已注册的请求参数显示，不会把仅保存但应用失败的设置误报成已应用。
 
@@ -198,18 +198,31 @@ Fast 和 Ultrafast 接受 `gpt-` 聊天模型 ID，排除 `gpt-oss` 及 image �
 ### 交互设置模型覆盖（不用手改 JSON）
 
 ```
-/ai-gateway overrides add
-  → 输入模型 ID（如 gpt-5.6-sol）
+/ai-gateway → Overrides → Add override（或 /ai-gateway overrides add）
+  → 手动输入精确模型 ID（如 gpt-5.6-sol）
+  → API routing？Keep / Auto (follow gateway) /
+      Chat Completions (/v1/chat/completions) / Responses (/v1/responses)
   → 上下文窗口？回车保留当前档案值，输入 272000 则改为 27.2 万
   → 最大输出？回车保留
   → 思考支持？保留 / true / false
   → 开启思考时，扩展档位？保留 / 禁用 xhigh、max / 仅 xhigh / 仅 max / 两者都启用
-  → 保存并自动重新注册，立即生效
+  → 保存并自动重新注册，下一次请求使用新路由
 ```
 
-也可从 `/ai-gateway overrides` → `Add override` 进入。扩展档位选择会写入 `thinkingLevelMap`，保留原有低档位限制和已有的 API 映射值；Esc 取消该步骤时不保存。只启用网关和模型确实支持的档位，插件不会检测后端能力。保存后在 Pi 的 `/thinking` 中选择本次会话的强度，或用 Shift+Tab 切换。
+API routing 选项含义：
 
-也可以一次性给参数（跳过对应的数值提问）：
+- `Keep`：保留模型原有的 `api` 字段；原本未设置则继续不设置。
+- `Auto (follow gateway)`：仅删除模型的 `api` 字段，回退到网关路由；**不是强制自动检测**，网关显式 `api` 仍优先于 `apiRouting: "auto"`。
+- `Chat Completions (/v1/chat/completions)`：为模型保存 `"api": "openai-completions"`。
+- `Responses (/v1/responses)`：为模型保存 `"api": "openai-responses"`。
+
+后三项中，模型已存的选项标注 `(current)`；未设置模型 `api` 时标在 Auto，即使网关显式设置了 API。显式选择即使与目录默认值相同也保留。数值和思考等后续流程不变；任何一步按 Esc 或取消均不保存。
+
+保存或删除覆盖会重新注册网关，当前选中模型无需重选，下一次请求即采用更新后的 API，同时保留会话 thinking 等状态；不影响正在执行的请求。若重新注册失败，配置仍已保存，可重试 `/ai-gateway fetch`。
+
+扩展档位选择会写入 `thinkingLevelMap`，保留原有低档位限制和已有的 API 映射值。只启用网关和模型确实支持的档位，插件不会检测后端能力。保存后若需改变本次会话的强度，可用 Pi 的 `/thinking` 或 Shift+Tab 切换。
+
+也可以一次性给参数，跳过对应的数值提问。非 UI 旧命令参数保持不变，不新增 API 路由参数；无 UI 时可按上述手动 JSON 路径设置模型 `api`，再运行 `/ai-gateway fetch` 或重启 Pi：
 
 ```
 /ai-gateway overrides add gpt-5.6-sol 272000
@@ -247,9 +260,10 @@ Fast 和 Ultrafast 接受 `gpt-` 聊天模型 ID，排除 `gpt-oss` 及 image �
      找不到 → 安全默认值（无思考、128K）
   6. 解析价格：手动 > 网关 > 已选预设 > $0
   7. 合并其他用户覆盖
-  8. 选择协议：官方 OpenAI Responses 模型 → /v1/responses；其他模型 → /v1/chat/completions
+  8. 选择协议：模型 overrides.api > 网关 api > apiRouting: auto（canonical 目录）> openai-completions
   9. 自动过滤 image/embedding/audio/tts/rerank 类模型
-  10. 对兼容的模型/API 应用已保存的 speed 设置，生成原生 samplingParams 和模型请求头
+  10. 按逐模型最终 API 校验 speed，兼容时生成原生 samplingParams 和模型请求头
+      不兼容的设置仍保留，但不附加速度 tier/header
   11. 注册为 provider：newapi/gpt-5.6-sol
 ```
 

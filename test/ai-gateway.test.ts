@@ -140,6 +140,7 @@ test("overrides TUI: saves extended levels, preserves metadata, and re-registers
         ui: {
           async select(title: string, choices: string[]) {
             if (title === "AI Gateway overrides") return "Add override";
+            if (title.startsWith("API routing:")) return "Keep";
             if (title === "Thinking support") return choices[scenario.existing ? 0 : scenario.disable ? 2 : 1];
             assert.match(title, /^Extended thinking levels/);
             assert.ok(choices.includes("Enable max only"));

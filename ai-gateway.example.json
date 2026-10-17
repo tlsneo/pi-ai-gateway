@@ -10,7 +10,7 @@
         "gpt-5.6-sol": "fast"
       },
       "overrides": {
-        "gpt-5.6-sol": { "contextWindow": 272000 }
+        "gpt-5.6-sol": { "api": "openai-responses", "contextWindow": 272000 }
       }
     }
   ]

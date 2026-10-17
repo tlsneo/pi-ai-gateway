@@ -10,7 +10,7 @@ import aiGatewayExtension, { configPath, loadConfig, saveConfig } from "../exten
 // Optional host-level integration: no Pi dependency is needed for the ordinary unit tests.
 const piPackage = process.env.PI_TEST_PACKAGE_DIR;
 
-test("Speed integration: real Pi session sends tiers and clears them on the next request without reselecting", {
+test("Speed/routing integration: real Pi session switches APIs and tiers on the next request without reselecting", {
   skip: piPackage ? false : "Set PI_TEST_PACKAGE_DIR to an installed pi-coding-agent package to run real HTTP tests",
   timeout: 30_000,
 }, async (t) => {
@@ -92,7 +92,12 @@ test("Speed integration: real Pi session sends tiers and clears them on the next
   t.after(() => session.dispose());
   const notices: string[] = [];
   const statuses = new Map<string, string>();
-  await session.bindExtensions({ mode: "print", uiContext: {
+  let routing = "Keep";
+  await session.bindExtensions({ mode: "tui", uiContext: {
+    async input() { return ""; },
+    async select(title: string, choices: string[]) {
+      return title.startsWith("API routing:") ? choices.find((s) => s.startsWith(routing)) : "Keep";
+    },
     notify(message: string) { notices.push(message); },
     setStatus(key: string, value: string | undefined) {
       if (value === undefined) statuses.delete(key);
@@ -114,6 +119,7 @@ test("Speed integration: real Pi session sends tiers and clears them on the next
     assert.equal(request.body.service_tier, mode === "ultrafast" ? "ultrafast" : mode === "fast" ? "priority" : undefined);
     assert.equal(request.headers["openai-service-tier"], mode === "ultrafast" ? "ultrafast" : undefined);
     assert.equal(request.headers["x-gateway"], "preserved");
+    assert.match(String(request.headers["user-agent"]), /^pi \(/);
     assert.equal(request.body.user, "hook-preserved");
     assert.equal(session.model.id, "gpt-5.5");
     assert.equal(session.model.contextWindow, 272000);
@@ -143,6 +149,41 @@ test("Speed integration: real Pi session sends tiers and clears them on the next
   assert.equal(requests.at(-1)!.body.service_tier, "priority");
   assert.equal(requests.at(-1)!.headers["openai-service-tier"], undefined);
   assert.equal(statuses.get("ai-gateway-speed"), "⚡ Fast");
+  assert.match(String(requests.at(-1)!.headers["user-agent"]), /^pi \(/);
+
+  // Only this model changes protocol; the selected model and thinking stay intact.
+  session.setThinkingLevel("high");
+  assert.equal(session.thinkingLevel, "high");
+  for (const choice of ["Responses", "Chat Completions", "Responses", "Auto"] as const) {
+    routing = choice;
+    await session.prompt("/ai-gateway overrides add gpt-5.5");
+    const responses = choice === "Responses";
+    assert.equal(session.model.api, responses ? "openai-responses" : "openai-completions");
+    assert.equal(runtime.getModel("gw", "gpt-other").api, "openai-completions");
+    assert.equal(loadConfig().gateways[0].api, "openai-completions");
+    assert.equal(loadConfig().gateways[0].overrides!["gpt-5.5"].api,
+      choice === "Auto" ? undefined : responses ? "openai-responses" : "openai-completions");
+    if (responses) await session.prompt("/ai-gateway speed add gpt-5.5 ultrafast");
+    const before = requests.length;
+    await session.prompt("Reply OK");
+    assert.equal(requests.length, before + 1, notices.join("\n"));
+    const request = requests.at(-1)!;
+    assert.equal(request.url, responses ? "/v1/responses" : "/v1/chat/completions");
+    assert.equal(request.body.service_tier, responses ? "ultrafast" : undefined);
+    assert.equal(request.headers["openai-service-tier"], responses ? "ultrafast" : undefined);
+    assert.match(String(request.headers["user-agent"]), /^pi \(/);
+    assert.equal(request.headers["x-gateway"], "preserved");
+    assert.equal(request.body.user, "hook-preserved");
+    assert.equal(session.model.contextWindow, 272000);
+    assert.equal(session.thinkingLevel, "high");
+    assert.equal(responses ? (request.body.reasoning as { effort: string }).effort : request.body.reasoning_effort, "high");
+    assert.equal(statuses.get("ai-gateway-speed"), responses ? "⚡⚡ Ultrafast" : undefined);
+  }
+  assert.equal(loadConfig().gateways[0].speed!["gpt-5.5"], "ultrafast");
+  await session.setModel(runtime.getModel("gw", "gpt-other"));
+  await session.prompt("Reply OK");
+  assert.equal(requests.at(-1)!.url, "/v1/chat/completions");
+  assert.equal(requests.at(-1)!.body.service_tier, undefined);
   assert.equal(requestsFromHooks, requests.length);
   assert.equal(responsesFromHooks, requests.length);
   assert.ok(streamEvents >= requests.length);
